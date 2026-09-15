@@ -10,7 +10,7 @@ BUNDLE_ID = com.loind.tsuyaku
 # finds something.
 export SDKROOT ?= /Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk
 
-.PHONY: build bundle run cert clean check-dr reset-tcc release test
+.PHONY: build bundle run cert clean check-dr reset-tcc release test install
 
 build:
 	swift build -c $(CONFIG) -Xswiftc -strict-concurrency=complete
@@ -30,6 +30,20 @@ test: build
 
 cert:
 	./scripts/make-cert.sh
+
+# Install to /Applications. Safe to re-run: the Designated Requirement is
+# certificate-anchored and carries no path, so the TCC grant follows the app
+# across the copy without re-prompting. Always builds release -- a debug
+# binary is not what you want sitting in the audio path of a live meeting.
+install: release
+	@codesign --verify --strict $(APP)
+	@osascript -e 'quit app "Tsuyaku"' >/dev/null 2>&1 || true
+	rm -rf /Applications/Tsuyaku.app
+	ditto $(APP) /Applications/Tsuyaku.app
+	@codesign -d -r- /Applications/Tsuyaku.app 2>&1 | grep -q cdhash \
+	  && echo "==> FAIL: DR is cdhash-pinned; TCC will re-prompt." \
+	  || echo "==> OK: DR is certificate-anchored; TCC grant persists."
+	@echo "==> Installed: /Applications/Tsuyaku.app"
 
 # The single check that predicts whether TCC grants survive a rebuild.
 check-dr:
