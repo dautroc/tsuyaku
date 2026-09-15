@@ -67,27 +67,10 @@ struct MessagesAPITranslator: Translator {
     }
 
     private var systemPrompt: String {
-        var p = """
-        You are a simultaneous interpreter in a live business meeting, rendering \
-        \(sourceName) speech into \(targetName).
-
-        Rules:
-        - Output ONLY the \(targetName) translation. No preamble, no notes, no quotes, \
-        no romanization, no alternatives.
-        - Translate the FINAL line only. Earlier turns are context for resolving \
-        omitted subjects, honorific register, and topic-chained references.
-        - Match the register of natural spoken business English. Keigo becomes \
-        ordinary professional politeness, not archaic formality.
-        - Japanese routinely omits subjects. Recover them from context rather than \
-        writing passive or subjectless English.
-        - Speech is disfluent. Silently drop fillers (ええと, あの, まあ).
-        - If a line is a fragment, translate it as a fragment. Never invent content \
-        to complete it.
-        """
-        if !glossary.isEmpty {
-            p += "\n\nFixed terminology (use exactly):\n" + glossary.promptLines
-        }
-        return p
+        InterpreterPrompt.system(sourceName: sourceName,
+                                 targetName: targetName,
+                                 glossary: glossary,
+                                 finalLineRule: InterpreterPrompt.finalTurnRule)
     }
 
     func translate(_ text: String, context: [(source: String, target: String)]) -> AsyncStream<TranslationDelta> {

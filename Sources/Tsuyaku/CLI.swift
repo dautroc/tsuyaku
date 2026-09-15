@@ -18,7 +18,7 @@ enum CLI {
       --install-assets            download the ja-JP on-device speech model
       --apple-preflight           check the Apple ja->en translation model
       --set-key <provider> <key>  store a key (provider: anthropic | deepseek)
-      --provider <name>           apple | anthropic | deepseek (default: saved setting)
+      --provider <name>           apple | foundation | ollama | anthropic | deepseek (default: saved setting)
       --compare                   run every configured backend over a Japanese fixture set
       --capture [bundle|global] [s]   dump captured audio to /tmp/tsuyaku-capture.wav
       --listen  [bundle|global] [s]   live transcription only, to stdout
@@ -244,8 +244,8 @@ enum CLI {
             let text = CommandLine.arguments.count > i+1 ? CommandLine.arguments[i+1]
                                                          : "それでは本日の定例会議を始めます。"
             let provider = selectedProvider() ?? .apple
-            guard provider.hasKey else {
-                print("no key for \(provider.rawValue). run: --set-key \(provider.rawValue) <key>"); exit(1)
+            if let why = provider.unusableReason {
+                print("\(provider.rawValue) is not usable: \(why)"); exit(1)
             }
             let t = provider.makeTranslator(glossary: .empty)
             let (out, ttfb) = await time(t, text)
@@ -259,7 +259,14 @@ enum CLI {
         // only honest way to answer "is provider X good enough for my meetings".
         if CommandLine.arguments.contains("--compare") {
             let fixtures = Fixtures.japaneseMeetingUtterances
-            let available = TranslationProvider.allCases.filter(\.hasKey)
+            let available = TranslationProvider.allCases.filter(\.isUsable)
+            for p in TranslationProvider.allCases where !p.isUsable {
+                print("skipping \(p.rawValue): \(p.unusableReason ?? "unusable")")
+            }
+            // Load the on-device LLM's weights before timing, or the first
+            // fixture pays for the load and the mean TTFB is a lie.
+            if available.contains(.foundation) { FoundationModelTranslator.prewarm() }
+            if available.contains(.ollama) { OllamaTranslator.prewarm() }
             print("comparing \(available.count) backend(s) over \(fixtures.count) utterances\n")
 
             var totals: [TranslationProvider: (Duration, Int)] = [:]
@@ -287,7 +294,9 @@ enum CLI {
             let glossary = Glossary(entries: ["ラクスル": "Raksul", "見積もり": "quote"])
             let provider = selectedProvider() ?? Settings.load().provider
             let translator = provider.makeTranslator(glossary: glossary)
-            print("translator: \(provider.displayName)\(provider.hasKey ? "" : " -- no key, fell back to on-device")")
+            print("translator: \(provider.displayName)\(provider.isUsable ? "" : " -- \(provider.unusableReason ?? "unusable"), fell back to on-device")")
+            if provider == .foundation { FoundationModelTranslator.prewarm() }
+            if provider == .ollama { OllamaTranslator.prewarm() }
             let stt  = try await AppleTranscriber(locale: Locale(identifier: "ja-JP"),
                                                   contextualStrings: glossary.sourceTerms)
             let tap  = SystemAudioTap(bundleIDs: bundle == "global" ? [] : [bundle],

@@ -3,23 +3,27 @@ import Foundation
 /// Which backend renders the translation.
 enum TranslationProvider: String, CaseIterable, Sendable, Codable {
     case apple
+    case foundation
+    case ollama
     case anthropic
     case deepseek
 
     var displayName: String {
         switch self {
-        case .apple:     "Apple on-device"
-        case .anthropic: "Claude (claude-haiku-4-5)"
-        case .deepseek:  "DeepSeek (deepseek-flash)"
+        case .apple:      "Apple on-device (NMT)"
+        case .foundation: "Apple on-device LLM"
+        case .ollama:     "Ollama (\(OllamaTranslator.defaultModel))"
+        case .anthropic:  "Claude (claude-haiku-4-5)"
+        case .deepseek:   "DeepSeek (deepseek-flash)"
         }
     }
 
     /// Keychain account holding this provider's key, or nil if it needs none.
     var keychainAccount: String? {
         switch self {
-        case .apple:     nil
-        case .anthropic: "anthropic"
-        case .deepseek:  "deepseek"
+        case .apple, .foundation, .ollama: nil
+        case .anthropic:          "anthropic"
+        case .deepseek:           "deepseek"
         }
     }
 
@@ -30,18 +34,57 @@ enum TranslationProvider: String, CaseIterable, Sendable, Codable {
         return Keychain.read(account: account) != nil
     }
 
-    /// Builds the backend, falling back to on-device if the key is missing so
-    /// a lost keychain entry degrades to "works, more literal" rather than
-    /// "silently translates nothing".
-    func makeTranslator(glossary: Glossary) -> any Translator {
-        guard let account = keychainAccount,
-              let key = Keychain.read(account: account) else {
-            return AppleTranslator()
-        }
+    /// Why this backend cannot run right now, or nil if it can. A key is not
+    /// the only way to be unconfigured: the on-device LLM is gated on Apple
+    /// Intelligence being enabled, and Ollama on a server being up, so `hasKey`
+    /// alone would report both ready on a machine where every request fails.
+    ///
+    /// The Ollama branch does blocking network I/O, so this must not be called
+    /// on the main actor -- see the note on `makeTranslator`. Callers that
+    /// display it (`AppDelegate`, `Settings.load`) already run it detached.
+    var unusableReason: String? {
         switch self {
-        case .apple:     return AppleTranslator()
-        case .anthropic: return MessagesAPITranslator.anthropic(apiKey: key, glossary: glossary)
-        case .deepseek:  return MessagesAPITranslator.deepSeek(apiKey: key, glossary: glossary)
+        case .apple:
+            return nil
+        case .foundation:
+            return FoundationModelTranslator.isAvailable
+                ? nil
+                : FoundationModelTranslator.describe(FoundationModelTranslator.availability)
+        case .ollama:
+            return OllamaTranslator.probe()
+        case .anthropic, .deepseek:
+            return hasKey ? nil : "no key -- run: --set-key \(rawValue) <key>"
+        }
+    }
+
+    /// One probe, not two: `unusableReason` is the single source of truth.
+    var isUsable: Bool { unusableReason == nil }
+
+    /// Builds the backend, degrading to on-device NMT when the backend is
+    /// configured but unreachable, so a lost keychain entry or a disabled Apple
+    /// Intelligence means "works, more literal" rather than "silently
+    /// translates nothing".
+    ///
+    /// Deliberately does NOT consult `isUsable`: `PipelineController` is
+    /// `@MainActor`, so an Ollama probe here would block the main thread for up
+    /// to two seconds while the panel sits empty -- the same failure the
+    /// keychain read caused before it was moved off the main thread. The cheap
+    /// checks stay inline; Ollama's reachability is left to surface as a
+    /// `.failed` delta on the first translation, which names the real cause in
+    /// the panel instead of pretending the user picked Apple NMT.
+    func makeTranslator(glossary: Glossary) -> any Translator {
+        switch self {
+        case .apple:      return AppleTranslator()
+        case .foundation: return FoundationModelTranslator.isAvailable
+                                 ? FoundationModelTranslator(glossary: glossary)
+                                 : AppleTranslator()
+        case .ollama:     return OllamaTranslator(glossary: glossary)
+        case .anthropic:
+            guard let key = Keychain.read(account: "anthropic") else { return AppleTranslator() }
+            return MessagesAPITranslator.anthropic(apiKey: key, glossary: glossary)
+        case .deepseek:
+            guard let key = Keychain.read(account: "deepseek") else { return AppleTranslator() }
+            return MessagesAPITranslator.deepSeek(apiKey: key, glossary: glossary)
         }
     }
 }

@@ -35,8 +35,9 @@ struct Settings: Sendable {
             // model, which is markedly more literal on business Japanese.
             s.provider = TranslationProvider.allCases.first { $0.needsKey && $0.hasKey } ?? .apple
         }
-        // A provider whose key was removed must not silently degrade.
-        if !s.provider.hasKey { s.provider = .apple }
+        // A provider that cannot run must not silently degrade: a removed key,
+        // or Apple Intelligence switched off under the on-device LLM.
+        if !s.provider.isUsable { s.provider = .apple }
         if let data = d.data(forKey: Key.glossary),
            let g = try? JSONDecoder().decode(Glossary.self, from: data) { s.glossary = g }
         return s

@@ -51,7 +51,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func loadSettings() async {
         let loaded = await Task.detached(priority: .userInitiated) {
             (settings: Settings.load(),
-             withKeys: Set(TranslationProvider.allCases.filter(\.hasKey)))
+             withKeys: Set(TranslationProvider.allCases.filter(\.isUsable)))
         }.value
 
         settings = loaded.settings
@@ -125,11 +125,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item.target = self
             item.representedObject = provider.rawValue
             item.state = (provider == settings.provider) ? .on : .off
-            // A cloud backend with no stored key would silently fall back to
-            // on-device, so show it as unavailable instead.
-            let hasKey = providersWithKeys.contains(provider)
-            item.isEnabled = hasKey
-            if !hasKey { item.title += " — no key" }
+            // A backend that cannot run would silently fall back to on-device,
+            // so show it as unavailable instead. Only the coarse reason is
+            // shown: the precise one comes from `unusableReason`, which probes
+            // the Ollama server and so must not be called while building a menu
+            // on the main thread. The CLI paths print the full reason.
+            let usable = providersWithKeys.contains(provider)
+            item.isEnabled = usable
+            if !usable {
+                item.title += provider.needsKey ? " — no key" : " — unavailable"
+            }
             submenu.addItem(item)
         }
         translation.submenu = submenu
