@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- CFBundleIdentifier must stay byte-stable forever: it is the TCC client key. -->
+    <key>CFBundleIdentifier</key>            <string>com.loind.tsuyaku</string>
+    <key>CFBundleName</key>                  <string>Tsuyaku</string>
+    <key>CFBundleDisplayName</key>           <string>Tsuyaku</string>
+    <key>CFBundleExecutable</key>            <string>Tsuyaku</string>
+    <key>CFBundlePackageType</key>           <string>APPL</string>
+    <key>CFBundleShortVersionString</key>    <string>0.1</string>
+    <key>CFBundleVersion</key>               <string>1</string>
+    <key>LSMinimumSystemVersion</key>        <string>26.0</string>
+    <key>NSHighResolutionCapable</key>       <true/>
+
+    <!-- Menu-bar-only app: no Dock icon, no main window. -->
+    <key>LSUIElement</key>                   <true/>
+
+    <!-- TCC usage strings. NSAudioCaptureUsageDescription drives the Core Audio
+         process-tap prompt ("would like access to record your system audio")
+         and has no Xcode dropdown entry, hence hand-writing this file. -->
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>Tsuyaku captures your meeting app's audio to generate live subtitles.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Tsuyaku can transcribe your own speech alongside the meeting audio.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>Tsuyaku transcribes captured audio entirely on this device.</string>
+</dict>
+</plist>
