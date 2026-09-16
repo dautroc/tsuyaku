@@ -14,9 +14,10 @@ jobs:
   build:
     # macos-26 is the only image carrying the macOS 26 SDK that Package.swift
     # requires (.macOS(.v26)), and it is arm64, which is what the Core Audio
-    # process-tap path is developed against. Its default Xcode ships SDK 26.5 --
-    # the same one the Makefile pins to locally, for the SwiftUIMacros reason
-    # documented there.
+    # process-tap path is developed against. The image has Xcode rather than
+    # Command Line Tools, so the Makefile's SDKROOT pin does not apply here and
+    # its xcrun fallback picks whatever the selected Xcode provides -- the
+    # Toolchain step below records which, since that is a moving target.
     runs-on: macos-26
     timeout-minutes: 30
 
@@ -33,7 +34,7 @@ jobs:
         run: |
           xcodebuild -version
           swift --version
-          echo "SDK: $(xcrun --show-sdk-path)"
+          echo "SDK $(xcrun --show-sdk-version): $(xcrun --show-sdk-path)"
 
       # Builds debug and runs the SubtitleStore and LanguagePicker self-checks.
       # Neither needs an audio device, a network or a window, which is the whole
