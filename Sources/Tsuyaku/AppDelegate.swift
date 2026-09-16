@@ -117,6 +117,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(withTitle: "Clear", action: #selector(clear), keyEquivalent: "").target = self
         menu.addItem(.separator())
 
+        let detect = menu.addItem(withTitle: "Detect English Automatically",
+                                  action: #selector(toggleAutoDetect), keyEquivalent: "")
+        detect.target = self
+        detect.state = settings.autoDetectLanguage ? .on : .off
+        detect.toolTip = "Run a second English recognizer and show English turns verbatim, untranslated."
+        menu.addItem(.separator())
+
         let translation = NSMenuItem(title: "Translation", action: nil, keyEquivalent: "")
         let submenu = NSMenu()
         for provider in TranslationProvider.allCases {
@@ -171,8 +178,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
               let provider = TranslationProvider(rawValue: raw) else { return }
         settings.provider = provider
         settings.save()
-        // The controller captures its translator at start(), so a running
-        // pipeline has to be cycled for the change to take effect.
+        rebuildController()
+    }
+
+    @objc private func toggleAutoDetect() {
+        settings.autoDetectLanguage.toggle()
+        settings.save()
+        rebuildController()
+    }
+
+    /// `Settings` is a value copied into the controller at init, so any change
+    /// to it means cycling the pipeline. One implementation, because there are
+    /// now two settings that need it and a third is easy to get subtly wrong.
+    private func rebuildController() {
         let wasRunning = store.isRunning
         if wasRunning { controller?.stop() }
         controller = PipelineController(store: store, settings: settings)

@@ -16,6 +16,7 @@ virtual audio driver, no Xcode.
 | M3 translation pipeline | three backends; DeepSeek is the default when a key exists |
 | M4 floating subtitle UI | done |
 | M5 polish | partial (transcript copy, settings persistence, device-loss recovery) |
+| M6 automatic English detection | built and tested; thresholds not yet fitted on a real meeting, so it ships **off** |
 
 ## Setup
 
@@ -62,6 +63,88 @@ Tsuyaku needs two separate on-device models, and they install differently.
 That asymmetry is why `TranslationDownloadHost` exists: Apple only offers the
 translation download through the SwiftUI `.translationTask` modifier attached to
 a live view, so the app keeps a small window purely to present that sheet.
+
+## Automatic English detection
+
+Meetings are mixed. Fed English, a `ja-JP` recognizer transliterates it and the
+translator then renders the transliteration as nonsense -- so the app runs a
+second `en-US` recognizer concurrently over the same audio and shows English
+turns **verbatim, untranslated**.
+
+Enable it from the menu bar (*Detect English Automatically*). It defaults to
+**off**: the picker decides what you read, and a Japanese turn rendered as
+English word salad is worse than a clumsy translation.
+
+```
+tap.buffers ──► fan-out ──┬─► ja.feed ──► ja.segments ──┬─► picker.observe
+                          └─► en.feed ──► en.segments ──┴─► gate.ingest  (BOTH gates, always)
+                                                                │
+                              jaGate.events ──────────┐         │
+                              enGate.events ──────────┴─► LanguagePicker ──► consume()
+                                                                             ├─ ja ─► Translator
+                                                                             └─ en ─► verbatim row
+```
+
+**Both gates ingest every segment; suppression happens on gate *events*, never
+on segments.** A `SegmentGate` only advances its sentence watermark when it
+ingests, so starving the losing gate leaves its watermark stale -- and on its
+next win, mid engine-utterance, it re-emits sentences the user already read in
+the other language. Feeding both always costs one extra gate and removes the
+whole class of bug; `SegmentGate` needs no mute or reset API.
+
+**The signal is script, not cross-model confidence.** Comparing a Japanese and
+an English acoustic model's confidence numbers needs calibration we do not have.
+The hiragana/kanji/glue ratio lives inside one model's output alphabet and needs
+none. The naive form of this is wrong on ordinary speech --
+「ミーティングのスケジュールをリスケしてもいいですか」 is entirely Japanese and
+two-thirds katakana -- so the score combines hiragana fraction, kanji fraction
+and grammatical-glue hits (は を の です ます …), minus a penalty for long
+unbroken katakana runs, which is what transliterated English actually looks
+like. `LanguageScore` is a pure function of a `String`; `PickerState` is a value
+type with an injected clock. Both are checked headlessly by `make test`.
+
+### What `--listen-dual` measured
+
+```bash
+./build/Tsuyaku.app/Contents/MacOS/Tsuyaku --capture     global 120   # record once
+./build/Tsuyaku.app/Contents/MacOS/Tsuyaku --listen-dual-file /tmp/tsuyaku-capture.wav
+./build/Tsuyaku.app/Contents/MacOS/Tsuyaku --listen-dual  global 60   # or live
+```
+
+Both engines side by side, with every number the picker would use and the
+decision it would make. Two results already changed the code:
+
+- **`transcriptionConfidence` is populated on finals only, never on volatile
+  results.** The picker locks on the first translatable unit, which is usually
+  volatile-derived, so confidence cannot inform that decision at all.
+  `confidenceTiebreak` is off and stays off unless this changes. Requesting the
+  attribute is free -- `AssetInventory.status` is identical with and without it.
+- **Fed English, the `ja` model sometimes emits nothing rather than
+  transliterating.** The script ratio is blind to that: there is no text to
+  score. One engine sitting silent while the other produces a full sentence is
+  now its own signal (`reason: .silence`), deliberately gated on the ja text
+  being *empty* rather than merely short, so an engine that is a beat behind is
+  not mistaken for a silent one.
+
+Also measured: `maximumReservedLocales = 5` with only `ja-JP` reserved; all nine
+`en-*` speech models already installed, so English needs no download;
+`bestAvailableAudioFormat(compatibleWith: [ja, en])` returns the same
+16 kHz/mono/Int16 the single engine already negotiated, so one tap feeds both and
+`FormatConverter` is untouched. Note that `AssetInventory.status` reports
+`.supported` rather than `.installed` until a locale is reserved *in that
+process*, and reservation is per app identity -- so a status check before
+`reserve` is not evidence of a missing model.
+
+### Still to fit, on a real meeting
+
+The thresholds are a starting hypothesis, not a measurement. On synthetic
+back-to-back TTS the `ja` engine held **one utterance open across 28 seconds**,
+spanning a language switch, which keeps its cumulative text scoring Japanese and
+starves the English side until the 12s safety valve fires. Real meetings have
+pauses, which is what makes the engine finalize -- but the turn model is keyed on
+gate `.settled`, so this is the risk to watch. Record a real meeting with
+`--capture`, replay it with `--listen-dual-file`, and set `languageThreshold`
+from the suggested split before turning the feature on.
 
 ## Translation backends
 
@@ -183,9 +266,9 @@ pipeline starts, so a new key still takes effect for translation itself.
 ```
 Sources/Tsuyaku/
   Audio/      SystemAudioTap, FormatConverter, AudioChunk
-  Speech/     AppleTranscriber, AssetGate
+  Speech/     AppleTranscriber, AssetGate, TranscriberFactory, DualListenDiagnostic
   Translate/  ClaudeTranslator, Translator, SSEParser, Glossary
-  Pipeline/   SegmentGate, Segment
+  Pipeline/   SegmentGate, Segment, SentenceSplitter, LanguageScore, LanguagePicker
   Support/    CoreAudioUtil, Keychain
 ```
 

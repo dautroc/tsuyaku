@@ -17,6 +17,8 @@ enum StoreSelfTest {
         multiSentenceTurn()
         provisionalThenRevised()
         failedTranslation()
+        englishRowNeedsNoTranslation()
+        transcriptDistinguishesTheTwoRowShapes()
         uniqueRowIDs()
         historyCap()
         settledCountSurvivesCap()
@@ -25,6 +27,7 @@ enum StoreSelfTest {
         scrollRuleFollowsTheSpeaker()
         scrollRuleSurvivesTheLivePane()
         scrollRuleLetsTheUserReadBack()
+        failures += PickerSelfTest.run()
         print(failures == 0 ? "\nall checks passed" : "\n\(failures) CHECK(S) FAILED")
         exit(failures == 0 ? 0 : 1)
     }
@@ -96,6 +99,47 @@ enum StoreSelfTest {
 
     /// `ForEach` and `scrollTo` both need row identity to be unique, which is
     /// exactly what sharing the utterance id used to break.
+    /// An English row has no translation step at all, so nothing ever calls
+    /// `append`. It still has to reach `finishLine` or it sits in the live pane
+    /// forever -- the same wedge `failedTranslation` guards against.
+    private static func englishRowNeedsNoTranslation() {
+        let s = SubtitleStore()
+        let u = UUID()
+        s.beginLine(utterance: u, source: "Let's ship it on Friday.",
+                    provisional: false, language: .en)
+        expect("an English row starts live", s.live.count == 1 && s.history.isEmpty)
+        s.finishLine(utterance: u)
+        expect("an English row graduates with no translation deltas",
+               s.live.isEmpty && s.history.count == 1)
+        expect("the recognized text is the subtitle, and target stays empty",
+               s.history.first?.source == "Let's ship it on Friday."
+               && s.history.first?.target.isEmpty == true
+               && s.history.first?.language == .en)
+    }
+
+    /// Japanese rows are a source line glossed by a translation; English rows
+    /// are the subtitle itself. The transcript must not emit an empty
+    /// blockquote pair for the latter.
+    private static func transcriptDistinguishesTheTwoRowShapes() {
+        let s = SubtitleStore()
+        let ja = UUID(), en = UUID()
+        s.beginLine(utterance: ja, source: "お疲れ様です。", provisional: false)
+        s.append(utterance: ja, delta: "Thanks for your hard work.")
+        s.finishLine(utterance: ja)
+        s.beginLine(utterance: en, source: "Let's ship it on Friday.",
+                    provisional: false, language: .en)
+        s.finishLine(utterance: en)
+
+        let md = s.transcriptMarkdown
+        expect("the Japanese row keeps its quoted source and translation",
+               md.contains("> お疲れ様です。") && md.contains("Thanks for your hard work."))
+        expect("the English row is one unquoted line",
+               md.contains("Let's ship it on Friday.")
+               && !md.contains("> Let's ship it on Friday."))
+        expect("no empty trailing block is emitted for the English row",
+               !md.contains("\n\n\n\n"))
+    }
+
     private static func uniqueRowIDs() {
         let s = SubtitleStore()
         let u = UUID()

@@ -15,7 +15,7 @@ final class PipelineController {
     private let settings: Settings
 
     private var tap: SystemAudioTap?
-    private var transcriber: AppleTranscriber?
+    private var transcribers: [AppleTranscriber] = []
     private var tasks: [Task<Void, Never>] = []
 
     /// Recent (source, translated) pairs handed to the translator as context.
@@ -32,39 +32,103 @@ final class PipelineController {
 
         do {
             let glossary = settings.glossary
-            let stt = try await AppleTranscriber(locale: settings.sourceLocale,
-                                                 contextualStrings: glossary.sourceTerms)
+
+            // Prepared BEFORE the tap exists, because `SystemAudioTap` fixes its
+            // output format at init and the device-recovery path reuses it --
+            // degrading from two engines to one afterwards would leave the tap
+            // driving a format nobody negotiated.
+            let prepared = try await TranscriberFactory.make(
+                primary: settings.sourceLocale,
+                secondary: settings.autoDetectLanguage ? settings.secondaryLocale : nil,
+                primaryTerms: glossary.sourceTerms
+            )
+
             let tap = SystemAudioTap(bundleIDs: settings.targetBundleIDs,
-                                     outputFormat: stt.inputFormat) { [weak self] event in
+                                     outputFormat: prepared.inputFormat) { [weak self] event in
                 // Fires on the tap's own queue when the output device changes.
                 Task { @MainActor in self?.handleRecovery(event) }
             }
-            let gate = SegmentGate(maxLatency: .seconds(settings.maxLatencySeconds))
             let translator = makeTranslator(glossary: glossary)
 
-            try await stt.start()
+            for engine in prepared.engines { try await engine.start() }
             try tap.start()
 
-            self.transcriber = stt
+            self.transcribers = prepared.engines
             self.tap = tap
+            store.autoDetecting = prepared.isDual
+            store.activeLanguage = nil
 
-            tasks = [
-                Task { for await chunk in tap.buffers { await stt.feed(chunk) } },
-                Task { for await seg in stt.segments { await gate.ingest(seg) } },
-                Task {
-                    // Drives the early-flush timer for turns that never pause.
-                    while !Task.isCancelled {
-                        try? await Task.sleep(for: .milliseconds(500))
-                        await gate.tick()
-                    }
-                },
-                Task { await self.consume(gate.events, using: translator) },
-                Task { for await text in gate.hearing { self.store.hearing = text } },
-            ]
+            switch prepared {
+            case .single(let stt, _):
+                let gate = SegmentGate(maxLatency: .seconds(settings.maxLatencySeconds))
+                tasks = [
+                    Task { for await chunk in tap.buffers { await stt.feed(chunk) } },
+                    Task { for await seg in stt.segments { await gate.ingest(seg) } },
+                    Task { await self.tickForever { await gate.tick() } },
+                    Task { await self.consume(gate.events, language: stt.language, using: translator) },
+                    Task { for await text in gate.hearing { self.store.hearing = text } },
+                ]
+
+            case .dual(let ja, let en, _):
+                var jaConfig = GateConfig.japanese
+                jaConfig.maxLatency = .seconds(settings.maxLatencySeconds)
+                var enConfig = GateConfig.english
+                enConfig.maxLatency = .milliseconds(settings.englishMaxLatencyMillis)
+
+                let jaGate = SegmentGate(config: jaConfig)
+                let enGate = SegmentGate(config: enConfig)
+                let picker = LanguagePicker(tuning: .init(settings))
+
+                tasks = [
+                    // Sequential fan-out, not a broadcast. `feed` only yields
+                    // into a bounded stream, so a stalled engine drops its own
+                    // oldest buffers instead of starving the other. Sharing one
+                    // tap stream also means both engines degrade on the SAME
+                    // audio, which is the property arbitration depends on.
+                    Task {
+                        for await chunk in tap.buffers {
+                            await ja.feed(chunk)
+                            await en.feed(chunk)
+                        }
+                    },
+
+                    // Both gates ingest EVERY segment, unconditionally. A gate
+                    // only advances its sentence watermark when it ingests, so
+                    // starving the losing gate would leave it stale and make it
+                    // re-emit already-read sentences on its next win.
+                    Task {
+                        for await seg in ja.segments {
+                            await picker.observe(seg)
+                            await jaGate.ingest(seg)
+                        }
+                    },
+                    Task {
+                        for await seg in en.segments {
+                            await picker.observe(seg)
+                            await enGate.ingest(seg)
+                        }
+                    },
+
+                    Task { for await e in jaGate.events { await picker.submit(e, from: .ja) } },
+                    Task { for await e in enGate.events { await picker.submit(e, from: .en) } },
+                    Task { for await t in jaGate.hearing { await picker.hearing(t, from: .ja) } },
+                    Task { for await t in enGate.hearing { await picker.hearing(t, from: .en) } },
+
+                    Task {
+                        await self.tickForever {
+                            await jaGate.tick()
+                            await enGate.tick()
+                            await picker.tick()
+                        }
+                    },
+                    Task { await self.consume(picker.decided, using: translator) },
+                    Task { for await text in picker.hearing { self.store.hearing = text } },
+                ]
+            }
 
             store.isRunning = true
             store.status = "Listening"
-            log.info("pipeline started")
+            log.info("pipeline started (\(prepared.isDual ? "ja+en" : "single", privacy: .public))")
         } catch {
             log.error("pipeline start failed: \(error.localizedDescription)")
             store.status = "Failed: \(error.localizedDescription)"
@@ -72,18 +136,27 @@ final class PipelineController {
         }
     }
 
+    /// Drives the gates' early-flush timers for turns that never pause.
+    private func tickForever(_ body: @Sendable @escaping () async -> Void) async {
+        while !Task.isCancelled {
+            try? await Task.sleep(for: .milliseconds(500))
+            await body()
+        }
+    }
+
     func stop() {
         try? tap?.stop()
         tap = nil
-        let stt = transcriber
-        transcriber = nil
+        let engines = transcribers
+        transcribers = []
         tasks.forEach { $0.cancel() }
         tasks.removeAll()
-        Task { await stt?.finish() }
+        Task { for e in engines { await e.finish() } }
         store.isRunning = false
         store.hearing = ""
         store.status = "Idle"
         store.notice = nil
+        store.activeLanguage = nil
     }
 
     /// The user switched headphones (or a device dropped out) and the tap
@@ -106,41 +179,75 @@ final class PipelineController {
         settings.provider.makeTranslator(glossary: glossary)
     }
 
+    /// Single-language mode: every event belongs to `language`.
     private func consume(_ events: AsyncStream<SegmentGate.Event>,
+                         language: SpokenLanguage,
                          using translator: any Translator) async {
         for await event in events {
-            switch event {
-            case .translate(let id, let source, let provisional):
-                store.hearing = ""
-                store.beginLine(utterance: id, source: source, provisional: provisional)
+            await handle(event, language: language, using: translator)
+        }
+    }
 
-                var accumulated = ""
-                for await delta in translator.translate(source, context: history) {
-                    switch delta {
-                    case .text(let t):
-                        accumulated += t
-                        store.append(utterance: id, delta: t)
-                    case .failed(let message):
-                        store.fail(utterance: id, message: "translation failed: \(message)")
-                    case .done:
-                        break
-                    }
-                }
-                // Terminal for this row: it can now graduate to the history
-                // pane, unless the gate still means to revise it.
+    /// Auto-detect mode: the picker has already attributed each event.
+    private func consume(_ events: AsyncStream<DecidedEvent>,
+                         using translator: any Translator) async {
+        for await decided in events {
+            await handle(decided.event, language: decided.language, using: translator)
+        }
+    }
+
+    private func handle(_ event: SegmentGate.Event,
+                        language: SpokenLanguage,
+                        using translator: any Translator) async {
+        switch event {
+        case .translate(let id, let source, let provisional):
+            store.hearing = ""
+            store.activeLanguage = language
+            store.beginLine(utterance: id, source: source,
+                            provisional: provisional, language: language)
+
+            // English is shown verbatim. An explicit branch rather than a
+            // passthrough `Translator` because the row shape differs: the text
+            // belongs in ONE field, and a fake translator would copy it into
+            // `target` and force every renderer to de-duplicate. It also keeps
+            // "no tokens are spent on English" visible at the call site.
+            guard language != .en else {
+                // Still terminal: a row only leaves the live pane once
+                // `translationDone` is set, so skipping this wedges it forever.
                 store.finishLine(utterance: id)
-
-                if !accumulated.isEmpty {
-                    history.append((source, accumulated))
-                    if history.count > settings.contextTurns {
-                        history.removeFirst(history.count - settings.contextTurns)
-                    }
-                }
-
-            case .settled(let id):
-                store.settle(utterance: id)
-                store.hearing = ""
+                return
             }
+
+            var accumulated = ""
+            for await delta in translator.translate(source, context: history) {
+                switch delta {
+                case .text(let t):
+                    accumulated += t
+                    store.append(utterance: id, delta: t)
+                case .failed(let message):
+                    store.fail(utterance: id, message: "translation failed: \(message)")
+                case .done:
+                    break
+                }
+            }
+            // Terminal for this row: it can now graduate to the history
+            // pane, unless the gate still means to revise it.
+            store.finishLine(utterance: id)
+
+            // Japanese turns only. An English turn appended here would render
+            // as a `user: text` / `assistant: same text` pair in the few-shot
+            // window, which is a literal echo demonstration -- a real risk of
+            // teaching a small local model to echo Japanese back untranslated.
+            if !accumulated.isEmpty {
+                history.append((source, accumulated))
+                if history.count > settings.contextTurns {
+                    history.removeFirst(history.count - settings.contextTurns)
+                }
+            }
+
+        case .settled(let id):
+            store.settle(utterance: id)
+            store.hearing = ""
         }
     }
 }

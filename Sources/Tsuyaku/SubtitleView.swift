@@ -78,7 +78,7 @@ struct SubtitleView: View {
             Circle()
                 .fill(store.notice != nil ? .orange : (store.isRunning ? .red : .secondary))
                 .frame(width: 8, height: 8)
-            Text(store.notice ?? (store.isRunning ? "JA → EN" : store.status))
+            Text(store.headerLabel)
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.white.opacity(store.notice != nil ? 1 : 0.85))
                 .lineLimit(1)
@@ -99,13 +99,22 @@ struct SubtitleView: View {
                     LazyVStack(alignment: .leading, spacing: 14) {
                         ForEach(store.history) { line in
                             VStack(alignment: .leading, spacing: 3) {
-                                Text(line.source)
-                                    .font(.system(size: 12))
-                                    .foregroundStyle(.white.opacity(0.55))
-                                Text(line.target.isEmpty ? " " : line.target)
-                                    .font(.system(size: 15, weight: .medium))
-                                    .foregroundStyle(line.failed ? .orange : .white)
-                                    .textSelection(.enabled)
+                                if line.language == .en {
+                                    // One line, at translation weight: this text
+                                    // is the subtitle, not a gloss above one.
+                                    Text(line.source)
+                                        .font(.system(size: 15, weight: .medium))
+                                        .foregroundStyle(line.failed ? .orange : .white)
+                                        .textSelection(.enabled)
+                                } else {
+                                    Text(line.source)
+                                        .font(.system(size: 12))
+                                        .foregroundStyle(.white.opacity(0.55))
+                                    Text(line.target.isEmpty ? " " : line.target)
+                                        .font(.system(size: 15, weight: .medium))
+                                        .foregroundStyle(line.failed ? .orange : .white)
+                                        .textSelection(.enabled)
+                                }
                             }
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .id(line.id)
@@ -246,19 +255,28 @@ struct SubtitleView: View {
         VStack(alignment: .leading, spacing: 7) {
             ForEach(store.live) { line in
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(line.source)
-                        .font(.system(size: 12))
-                        .foregroundStyle(.white.opacity(0.6))
-                        .lineLimit(2)
-                    if line.target.isEmpty && !line.failed {
-                        Text("translating…")
-                            .font(.system(size: 13))
-                            .foregroundStyle(.white.opacity(0.3))
-                    } else {
-                        Text(line.target)
+                    if line.language == .en {
+                        // Never reaches the "translating…" placeholder: there
+                        // is no translation step to wait for.
+                        Text(line.source)
                             .font(.system(size: 15, weight: .medium))
                             .foregroundStyle(line.failed ? .orange : .white)
                             .lineLimit(4)
+                    } else {
+                        Text(line.source)
+                            .font(.system(size: 12))
+                            .foregroundStyle(.white.opacity(0.6))
+                            .lineLimit(2)
+                        if line.target.isEmpty && !line.failed {
+                            Text("translating…")
+                                .font(.system(size: 13))
+                                .foregroundStyle(.white.opacity(0.3))
+                        } else {
+                            Text(line.target)
+                                .font(.system(size: 15, weight: .medium))
+                                .foregroundStyle(line.failed ? .orange : .white)
+                                .lineLimit(4)
+                        }
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)

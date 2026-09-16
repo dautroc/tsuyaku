@@ -15,13 +15,16 @@ enum CLI {
       (no arguments)              launch the menu bar app
 
       --probe                     report framework/model/asset status
-      --install-assets            download the ja-JP on-device speech model
+      --install-assets            download the on-device speech model (see --locale)
       --apple-preflight           check the Apple ja->en translation model
       --set-key <provider> <key>  store a key (provider: anthropic | deepseek)
       --provider <name>           apple | foundation | ollama | anthropic | deepseek (default: saved setting)
+      --locale <bcp47>            speech locale for --listen / --install-assets (default: ja-JP)
       --compare                   run every configured backend over a Japanese fixture set
       --capture [bundle|global] [s]   dump captured audio to /tmp/tsuyaku-capture.wav
       --listen  [bundle|global] [s]   live transcription only, to stdout
+      --listen-dual [bundle|global] [s]   ja + en side by side, with picker scores
+      --listen-dual-file <path.wav>   the same, replayed from a --capture recording
       --translate-text <ja>       one-shot translation, reports TTFB
       --pipeline [bundle|global] [s]  full pipeline to stdout
       --store-selftest            check the subtitle pane logic (no audio, no network)
@@ -82,6 +85,15 @@ enum CLI {
         return TranslationProvider(rawValue: CommandLine.arguments[i+1])
     }
 
+    /// Speech locale for the single-language diagnostics. Defaults to Japanese.
+    static func selectedLocale() -> Locale {
+        guard let i = CommandLine.arguments.firstIndex(of: "--locale"),
+              CommandLine.arguments.count > i + 1 else {
+            return Locale(identifier: "ja-JP")
+        }
+        return Locale(identifier: CommandLine.arguments[i + 1])
+    }
+
     static func pad(_ s: String) -> String {
         s.padding(toLength: 10, withPad: " ", startingAt: 0)
     }
@@ -118,9 +130,10 @@ enum CLI {
         }
 
         if CommandLine.arguments.contains("--install-assets") {
-            print("--- installing ja-JP speech assets (this can take a while) ---")
+            let locale = selectedLocale()
+            print("--- installing \(locale.identifier(.bcp47)) speech assets (this can take a while) ---")
             do {
-                let t = try await AssetGate.prepare(locale: Locale(identifier: "ja-JP")) { p in
+                let t = try await AssetGate.prepare(locale: locale) { p in
                     print("  download progress object: \(p.localizedDescription ?? "n/a")")
                 }
                 let fmt = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [t])
@@ -181,7 +194,7 @@ enum CLI {
             let seconds = CommandLine.arguments.count > i+2 ? Double(CommandLine.arguments[i+2]) ?? 15 : 15
 
             do {
-                let stt = try await AppleTranscriber(locale: Locale(identifier: "ja-JP"),
+                let stt = try await AppleTranscriber(locale: selectedLocale(),
                                                      contextualStrings: ["ラクスル", "見積もり", "定例会議"])
                 let fmt = stt.inputFormat
                 let tap = SystemAudioTap(bundleIDs: bundle == "global" ? [] : [bundle], outputFormat: fmt)
@@ -211,6 +224,22 @@ enum CLI {
             }
         }
 
+
+        if let i = CommandLine.arguments.firstIndex(of: "--listen-dual") {
+            let bundle  = CommandLine.arguments.count > i+1 ? CommandLine.arguments[i+1] : "global"
+            let seconds = CommandLine.arguments.count > i+2 ? Double(CommandLine.arguments[i+2]) ?? 30 : 30
+            await DualListenDiagnostic.runLive(bundle: bundle, seconds: seconds)
+            exit(0)
+        }
+
+        if let i = CommandLine.arguments.firstIndex(of: "--listen-dual-file") {
+            guard CommandLine.arguments.count > i+1 else {
+                print("--listen-dual-file needs a path to a .wav recorded by --capture")
+                exit(1)
+            }
+            await DualListenDiagnostic.runFile(path: CommandLine.arguments[i+1])
+            exit(0)
+        }
 
         if CommandLine.arguments.contains("--device-switch-test") {
             await DeviceSwitchTest.run()

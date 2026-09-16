@@ -22,7 +22,7 @@ import OSLog
 /// been sent. Re-splitting from scratch every time makes revisions harmless.
 actor SegmentGate {
 
-    enum Event: Sendable {
+    enum Event: Sendable, Equatable {
         case translate(id: UUID, source: String, provisional: Bool)
         case settled(id: UUID)
     }
@@ -30,9 +30,10 @@ actor SegmentGate {
     private let log = Logger(subsystem: "com.loind.tsuyaku", category: "gate")
     private static let debug = ProcessInfo.processInfo.environment["TSUYAKU_DEBUG"] != nil
 
+    /// Per-language tuning: backstop latency, terminators, abbreviation guards.
+    private let config: GateConfig
     /// How long an unterminated tail may sit before we translate it anyway.
-    private let maxLatency: Duration
-    private static let terminators: Set<Character> = ["。", "！", "？", "!", "?", "．", "."]
+    private var maxLatency: Duration { config.maxLatency }
 
     /// Count of complete sentences already sent for translation this utterance.
     private var sentSentences = 0
@@ -54,8 +55,14 @@ actor SegmentGate {
     let hearing: AsyncStream<String>
     private let emitHearing: @Sendable (String) -> Void
 
-    init(maxLatency: Duration = .seconds(7)) {
-        self.maxLatency = maxLatency
+    init(maxLatency: Duration) {
+        var c = GateConfig.japanese
+        c.maxLatency = maxLatency
+        self.init(config: c)
+    }
+
+    init(config: GateConfig = .japanese) {
+        self.config = config
 
         var c: AsyncStream<Event>.Continuation!
         self.events = AsyncStream(bufferingPolicy: .unbounded) { c = $0 }
@@ -130,20 +137,12 @@ actor SegmentGate {
     }
 
     /// Splits cumulative text into complete (terminated) sentences plus any
-    /// unterminated trailing fragment.
+    /// unterminated trailing fragment, and records the tail for `tick`.
     private func split(_ text: String) -> (sentences: [String], tail: String) {
-        var sentences: [String] = []
-        var current = ""
-        for ch in text {
-            current.append(ch)
-            if Self.terminators.contains(ch) {
-                let s = current.trimmingCharacters(in: .whitespaces)
-                if !s.isEmpty { sentences.append(s) }
-                current = ""
-            }
-        }
-        let tail = current.trimmingCharacters(in: .whitespaces)
-        pendingTail = tail
-        return (sentences, tail)
+        let result = SentenceSplitter.split(text,
+                                            terminators: config.terminators,
+                                            abbreviations: config.abbreviations)
+        pendingTail = result.tail
+        return result
     }
 }

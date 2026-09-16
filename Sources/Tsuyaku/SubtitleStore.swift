@@ -12,6 +12,10 @@ struct SubtitleLine: Identifiable, Equatable {
     let utterance: UUID
     var source: String
     var target: String
+    /// Japanese rows carry source + translation. English rows are shown
+    /// verbatim: the recognized text IS the subtitle, so `target` stays empty
+    /// and the view renders one line instead of a gloss over a translation.
+    var language: SpokenLanguage = .ja
     /// Flushed early because the speaker was still going; may be revised.
     var provisional: Bool
     /// The translation stream for this row has ended (successfully or not).
@@ -46,6 +50,16 @@ final class SubtitleStore: ObservableObject {
     /// Distinct from `status`, which the header only shows while stopped.
     @Published var notice: String?
 
+    /// Which language the picker committed to for the turn being rendered, or
+    /// nil before the first decision. Drives the header, which doubles as a
+    /// live indicator that detection is working -- exactly where a user looks
+    /// when they suspect a misdetection.
+    @Published var activeLanguage: SpokenLanguage?
+    /// Whether two recognizers are actually running. False when the user has
+    /// auto-detect off, or when preparing the second locale failed and the
+    /// pipeline degraded to Japanese only.
+    @Published var autoDetecting: Bool = false
+
     /// Every row that has ever graduated into `history`, counted. Monotonic,
     /// which `history.count` is not: past `maxLines` rows `graduate()` appends
     /// and trims in the same breath and the count stops moving, so anything
@@ -58,18 +72,23 @@ final class SubtitleStore: ObservableObject {
 
     var hasLiveContent: Bool { !live.isEmpty || !hearing.isEmpty }
 
-    func beginLine(utterance: UUID, source: String, provisional: Bool) {
+    /// - Parameter language: defaults to Japanese so existing call sites, and
+    ///   the store self-tests, keep their meaning unchanged.
+    func beginLine(utterance: UUID, source: String, provisional: Bool,
+                   language: SpokenLanguage = .ja) {
         // The tail backstop can translate an unfinished clause, and the finished
         // sentence then arrives moments later. Replace the provisional row in
         // place so the panel shows one line that firms up, not a near-duplicate.
         if !provisional, let last = live.last, last.utterance == utterance, last.provisional,
            source.hasPrefix(last.source) || last.source.hasPrefix(source) {
             live[live.count - 1] = SubtitleLine(utterance: utterance, source: source, target: "",
+                                                language: language,
                                                 provisional: false, translationDone: false,
                                                 failed: false, at: last.at)
             return
         }
         live.append(SubtitleLine(utterance: utterance, source: source, target: "",
+                                 language: language,
                                  provisional: provisional, translationDone: false,
                                  failed: false, at: .now))
     }
@@ -147,14 +166,32 @@ final class SubtitleStore: ObservableObject {
         }
     }
 
+    /// The header label. Japanese-only mode keeps the original string.
+    var headerLabel: String {
+        if let notice { return notice }
+        guard isRunning else { return status }
+        guard autoDetecting else { return "JA → EN" }
+        switch activeLanguage {
+        case .ja?: return "auto · JA → EN"
+        case .en?: return "auto · EN"
+        case nil:  return "auto · JA → EN / EN"
+        }
+    }
+
     var transcriptMarkdown: String {
         var out = "# Meeting transcript\n\n"
         let fmt = DateFormatter()
         fmt.dateFormat = "HH:mm:ss"
         for l in history + live {
             out += "**\(fmt.string(from: l.at))**\n\n"
-            out += "> \(l.source)\n\n"
-            out += "\(l.target)\n\n"
+            if l.language == .en {
+                // Not a blockquote: an English row is the subtitle itself, not
+                // a source line being glossed by a translation below it.
+                out += "\(l.source)\n\n"
+            } else {
+                out += "> \(l.source)\n\n"
+                out += "\(l.target)\n\n"
+            }
         }
         return out
     }

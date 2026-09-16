@@ -6,7 +6,10 @@ import AVFoundation
 ///
 /// `@unchecked Sendable` is sound here by construction: `FormatConverter`
 /// allocates `buffer` fresh for each chunk and drops its reference immediately,
-/// so exactly one owner exists at any moment. Nothing else aliases it.
+/// so the buffer is written once, on the audio thread, and is immutable from
+/// then on. Any number of concurrent readers is therefore fine -- which is what
+/// makes the ja/en fan-out in `PipelineController` safe, since both engines are
+/// handed the same chunk.
 struct AudioChunk: @unchecked Sendable {
     let buffer: AVAudioPCMBuffer
     /// Mach host time of the first frame, for end-to-end latency measurement.

@@ -13,13 +13,27 @@ struct Segment: Sendable, Identifiable {
     let range: CMTimeRange
     /// Mach host time when this text became available, for latency measurement.
     let hostTime: UInt64
+    /// Which recognizer produced this. Two run concurrently over the same audio.
+    let language: SpokenLanguage
+    /// Length-weighted mean of the recognizer's per-run confidence, when the
+    /// model reports one. Whether it is populated at all, and on what scale, is
+    /// a measured property -- see `--listen-dual`. Never the primary signal.
+    let confidence: Double?
 
-    init(id: UUID = UUID(), text: String, isFinal: Bool, range: CMTimeRange, hostTime: UInt64 = mach_absolute_time()) {
+    init(id: UUID = UUID(),
+         text: String,
+         isFinal: Bool,
+         range: CMTimeRange,
+         hostTime: UInt64 = mach_absolute_time(),
+         language: SpokenLanguage = .ja,
+         confidence: Double? = nil) {
         self.id = id
         self.text = text
         self.isFinal = isFinal
         self.range = range
         self.hostTime = hostTime
+        self.language = language
+        self.confidence = confidence
     }
 }
 
