@@ -22,6 +22,12 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+        with:
+          # bundle.sh derives CFBundleVersion from the commit count, and
+          # checkout is shallow by default -- without this the app CI packages
+          # reports build 1 regardless of history, so the packaging step would
+          # not be exercising what a release actually produces.
+          fetch-depth: 0
 
       - name: Toolchain
         run: |
