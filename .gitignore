@@ -3,3 +3,4 @@ build/
 *.p12
 *.key
 *.crt
+dist/

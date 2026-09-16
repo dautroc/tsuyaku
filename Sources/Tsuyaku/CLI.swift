@@ -14,6 +14,7 @@ enum CLI {
 
       (no arguments)              launch the menu bar app
 
+      --version                   print the version and exit
       --probe                     report framework/model/asset status
       --install-assets            download the on-device speech model (see --locale)
       --apple-preflight           check the Apple ja->en translation model
@@ -119,6 +120,10 @@ enum CLI {
     static func run() async throws {
         if CommandLine.arguments.contains("--help") || CommandLine.arguments.contains("-h") {
             print(usage); exit(0)
+        }
+
+        if CommandLine.arguments.contains("--version") {
+            print(Version.full); exit(0)
         }
 
         if CommandLine.arguments.contains("--probe") {

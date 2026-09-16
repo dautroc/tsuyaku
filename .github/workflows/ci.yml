@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # macos-26 is the only image carrying the macOS 26 SDK that Package.swift
+    # requires (.macOS(.v26)), and it is arm64, which is what the Core Audio
+    # process-tap path is developed against. Its default Xcode ships SDK 26.5 --
+    # the same one the Makefile pins to locally, for the SwiftUIMacros reason
+    # documented there.
+    runs-on: macos-26
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+          echo "SDK: $(xcrun --show-sdk-path)"
+
+      # Builds debug and runs the SubtitleStore and LanguagePicker self-checks.
+      # Neither needs an audio device, a network or a window, which is the whole
+      # reason they are worth running on a headless runner.
+      - name: Build and self-test
+        run: make test
+
+      # The icon is committed, so this only proves the generator still compiles
+      # and runs. It deliberately does not diff the output: the menu bar PDF
+      # embeds the host's macOS build string in its Producer field, and
+      # CoreGraphics rasterisation is not promised to be identical across OS
+      # versions, so a byte comparison would fail for reasons unrelated to the art.
+      - name: Icon generator still runs
+        run: |
+          make icon
+          test -s Resources/AppIcon.icns
+          test -s Resources/MenuBarIconTemplate.pdf
+
+      # Packaging is where the breakable parts live -- PlistBuddy stamping,
+      # resource copying, codesign. There is no signing identity on the runner,
+      # so bundle.sh falls back to ad-hoc; `make check-dr` is therefore NOT run
+      # here, because ad-hoc signing is cdhash-pinned by definition and it would
+      # always fail.
+      - name: Bundle and verify
+        run: |
+          make release
+          codesign --verify --strict --verbose=2 build/Tsuyaku.app
+          ./build/Tsuyaku.app/Contents/MacOS/Tsuyaku --version
+
+      - name: Info.plist was stamped
+        run: |
+          plist=build/Tsuyaku.app/Contents/Info.plist
+          stamped="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist")"
+          expected="$(tr -d '[:space:]' < VERSION)"
+          [ "$stamped" = "$expected" ] || {
+            echo "Info.plist says $stamped, VERSION says $expected"; exit 1;
+          }
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$plist"
+          test -s build/Tsuyaku.app/Contents/Resources/AppIcon.icns

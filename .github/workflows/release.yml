@@ -1,0 +1,111 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build and publish (e.g. v0.1.0)'
+        required: true
+
+permissions:
+  contents: write        # needed to create the Release and upload assets
+
+jobs:
+  release:
+    runs-on: macos-26
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0     # bundle.sh derives CFBundleVersion from the commit count
+
+      # Three things have to agree before anything is published: the tag, the
+      # VERSION file, and the CHANGELOG. Checking them first means a mismatch
+      # costs a failed job rather than a wrong release that has to be deleted.
+      - name: Tag, VERSION and CHANGELOG agree
+        id: check
+        run: |
+          tag="${{ inputs.tag || github.ref_name }}"
+          version="${tag#v}"
+          declared="$(tr -d '[:space:]' < VERSION)"
+          if [ "$version" != "$declared" ]; then
+            echo "tag $tag implies version $version, but VERSION says $declared" >&2
+            exit 1
+          fi
+          ./scripts/changelog-section.sh "$version" > "$RUNNER_TEMP/notes.md"
+          echo "tag=$tag"         >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          # A pre-release is anything with a hyphen: 0.2.0-rc1, 0.2.0-beta.
+          case "$version" in
+            *-*) echo "prerelease=true"  >> "$GITHUB_OUTPUT" ;;
+            *)   echo "prerelease=false" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - name: Self-test
+        run: make test
+
+      # Ad-hoc signed: the runner has no code-signing identity, and the
+      # repository's self-signed one is deliberately local-only. See the note
+      # this workflow appends to the release body.
+      - name: Build and package
+        run: make dist VERSION=${{ steps.check.outputs.version }}
+
+      - name: Verify the artifact
+        run: |
+          version="${{ steps.check.outputs.version }}"
+          codesign --verify --strict --verbose=2 build/Tsuyaku.app
+          # Unpack the zip and check the copy that ships, not the one on disk.
+          ditto -x -k "dist/Tsuyaku-$version.zip" "$RUNNER_TEMP/unpacked"
+          codesign --verify --strict "$RUNNER_TEMP/unpacked/Tsuyaku.app"
+          reported="$("$RUNNER_TEMP/unpacked/Tsuyaku.app/Contents/MacOS/Tsuyaku" --version)"
+          echo "$reported"
+          case "$reported" in
+            "Tsuyaku $version ("*) ;;
+            *) echo "packaged app reports '$reported', expected version $version" >&2; exit 1 ;;
+          esac
+
+      - name: Release notes
+        run: |
+          version="${{ steps.check.outputs.version }}"
+          notes="$RUNNER_TEMP/notes.md"
+          {
+            echo
+            echo '---'
+            echo
+            echo '### Install'
+            echo
+            echo 'This build is **ad-hoc signed, not notarized**. macOS quarantines it,'
+            echo 'and its Designated Requirement is pinned to the binary hash, so a TCC'
+            echo 'grant will not survive replacing it with the next release. To try it:'
+            echo
+            echo '```bash'
+            echo "unzip Tsuyaku-$version.zip"
+            echo 'xattr -dr com.apple.quarantine Tsuyaku.app'
+            echo 'mv Tsuyaku.app /Applications/'
+            echo '```'
+            echo
+            echo 'For regular use, build from source instead — `make cert && make install`'
+            echo 'signs with a local identity whose DR is certificate-anchored, so the'
+            echo 'microphone and system-audio grants persist across rebuilds.'
+            echo
+            echo '```'
+            cat "dist/Tsuyaku-$version.zip.sha256"
+            echo '```'
+          } >> "$notes"
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ steps.check.outputs.tag }}"
+          version="${{ steps.check.outputs.version }}"
+          gh release create "$tag" \
+            --title "Tsuyaku $version" \
+            --notes-file "$RUNNER_TEMP/notes.md" \
+            ${{ steps.check.outputs.prerelease == 'true' && '--prerelease' || '' }} \
+            "dist/Tsuyaku-$version.zip" \
+            "dist/Tsuyaku-$version.zip.sha256"

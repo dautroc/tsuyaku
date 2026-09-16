@@ -70,8 +70,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func setUpStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        item.button?.image = NSImage(systemSymbolName: "captions.bubble",
-                                     accessibilityDescription: "Tsuyaku")
+        // Bundled vector mark, falling back to the SF Symbol it was drawn from
+        // so a `swift run` outside the .app still shows something. The
+        // `Template` suffix is what makes AppKit tint it for the menu bar's
+        // appearance; setting `isTemplate` explicitly costs nothing and
+        // survives anyone renaming the file.
+        let icon = NSImage(named: "MenuBarIconTemplate")
+            ?? NSImage(systemSymbolName: "captions.bubble", accessibilityDescription: nil)
+        icon?.isTemplate = true
+        icon?.accessibilityDescription = "Tsuyaku"
+        item.button?.image = icon
         item.menu = startingMenu()
         statusItem = item
     }

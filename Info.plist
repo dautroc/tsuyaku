@@ -8,10 +8,16 @@
     <key>CFBundleDisplayName</key>           <string>Tsuyaku</string>
     <key>CFBundleExecutable</key>            <string>Tsuyaku</string>
     <key>CFBundlePackageType</key>           <string>APPL</string>
-    <key>CFBundleShortVersionString</key>    <string>0.1</string>
+    <!-- Both are rewritten at bundle time from VERSION and the commit count;
+         these values are only what a raw `swift build` binary reports. -->
+    <key>CFBundleShortVersionString</key>    <string>0.1.0</string>
     <key>CFBundleVersion</key>               <string>1</string>
     <key>LSMinimumSystemVersion</key>        <string>26.0</string>
     <key>NSHighResolutionCapable</key>       <true/>
+
+    <!-- Resources/AppIcon.icns, copied in by scripts/bundle.sh. The extension
+         is omitted on purpose: CFBundleIconFile is a name, not a path. -->
+    <key>CFBundleIconFile</key>              <string>AppIcon</string>
 
     <!-- Menu-bar-only app: no Dock icon, no main window. -->
     <key>LSUIElement</key>                   <true/>

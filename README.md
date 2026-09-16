@@ -50,6 +50,65 @@ make test                                                      # subtitle pane l
 `--device-switch-test` needs audio playing to measure (`afplay something &`)
 and briefly changes your default output device, restoring it afterwards.
 
+## Releases and versioning
+
+**Build from source rather than downloading a release.** The zip attached to a
+GitHub Release is ad-hoc signed, because CI has no code-signing identity and the
+one `scripts/make-cert.sh` creates is deliberately local-only. An ad-hoc
+signature makes the app's Designated Requirement a cdhash, which means macOS
+quarantines the download and drops the microphone and system-audio grants the
+moment you replace one build with the next — the failure the whole signing
+harness exists to avoid. A downloaded build is for trying the app out:
+
+```bash
+unzip Tsuyaku-<version>.zip
+xattr -dr com.apple.quarantine Tsuyaku.app
+mv Tsuyaku.app /Applications/
+```
+
+For anything beyond that, `make cert` once and then `make install`, which builds
+release, signs with the certificate-anchored identity and copies to
+`/Applications`. It re-runs safely: the DR carries no path, so the TCC grant
+follows the app across the copy without re-prompting.
+
+`VERSION` is the single source of truth. `scripts/bundle.sh` stamps it, plus the
+commit count as `CFBundleVersion`, into the bundled `Info.plist`, so
+`Tsuyaku --version` always reports what was actually packaged. A bare
+`swift build` binary has no bundle to read and says build `dev` instead.
+
+Cutting a release means editing `VERSION` and `CHANGELOG.md` in the same commit,
+then tagging it:
+
+```bash
+git tag -a v0.2.0 -m "Tsuyaku 0.2.0"
+git push origin main --follow-tags
+```
+
+`.github/workflows/release.yml` refuses to publish unless the tag, `VERSION` and
+a matching `CHANGELOG.md` section all agree, then builds, packages with `ditto`,
+verifies the signature and the reported version on the *unpacked* copy, and uses
+that changelog section as the release notes. `.github/workflows/ci.yml` runs the
+build, the self-tests and the full packaging path on every push and pull request.
+
+## Icons
+
+`Resources/AppIcon.icns` and `Resources/MenuBarIconTemplate.pdf` are drawn by
+`scripts/make-icon.swift` and committed; `make icon` redraws them. Code rather
+than a design file because a Command Line Tools build has no asset catalog and no
+`actool`, so the `.icns` has to be assembled from an `.iconset` by hand either
+way — and this way the art is diffable.
+
+The app icon is drawn at three levels of detail. Scaling one drawing down to
+16px turns the speech bubble's tail into three grey pixels and merges the two
+subtitle bars into a smudge, so the small variants drop the tail and spend the
+pixels on bar thickness and on the gap between the bars, which is the feature
+that reads as "subtitles" rather than "a blob".
+
+The menu bar mark is a template PDF: vector, so it tracks any menu bar height,
+and the `Template` suffix is what makes AppKit tint it for light and dark. The
+status item falls back to the `captions.bubble` SF Symbol it was drawn from when
+the app runs outside a bundle.
+
 ## Two models, two install paths
 
 Tsuyaku needs two separate on-device models, and they install differently.
@@ -269,7 +328,10 @@ Sources/Tsuyaku/
   Speech/     AppleTranscriber, AssetGate, TranscriberFactory, DualListenDiagnostic
   Translate/  ClaudeTranslator, Translator, SSEParser, Glossary
   Pipeline/   SegmentGate, Segment, SentenceSplitter, LanguageScore, LanguagePicker
-  Support/    CoreAudioUtil, Keychain
+  Support/    CoreAudioUtil, Keychain, Settings, Version
+
+Resources/    AppIcon.icns, MenuBarIconTemplate.pdf  (generated, committed)
+scripts/      bundle.sh, make-cert.sh, make-icon.swift, changelog-section.sh
 ```
 
 `TranscriptionEngine` and `Translator` are protocols so backends swap without
