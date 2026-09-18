@@ -41,6 +41,18 @@ enum InterpreterPrompt {
         omitted subjects, honorific register, and topic-chained references.
         """
 
+    /// For backends handed the utterance as audio. It must also be told not to
+    /// transcribe: asked to interpret speech, an omni model's default instinct
+    /// is to return the source words first, or a bilingual pair, and either one
+    /// would land verbatim in the subtitle pane.
+    static let audioRule = """
+        The line to translate is the speech in the attached audio. Output its \
+        translation only -- never the original words, never a transcript, never \
+        both languages. Earlier turns are your own previous lines, provided for \
+        resolving omitted subjects, honorific register, and topic-chained \
+        references. If the audio contains no speech, output nothing at all.
+        """
+
     /// For backends given one prompt with the context labelled inside it.
     static let labelledRule = """
         Translate the line under "Translate:" only. Anything under "Context:" is \

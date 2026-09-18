@@ -8,6 +8,67 @@ patch version moves for fixes and packaging. Nothing here is API-stable.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-18
+
+Adds a translation backend that listens instead of reading. Everything from
+0.1.0 is unchanged and still the default; the new path is opt-in.
+
+### Added
+
+**Qwen Omni backend: speech straight to English.** `qwenOmni` is the first
+backend that is not a `Translator`. It implements a new `AudioTranslator`
+protocol and takes the captured utterance as a WAV blob, so `SpeechAnalyzer` is
+not in the graph at all -- `PipelineController` branches on
+`TranslationProvider.isAudioNative` before it builds a transcriber, and never
+downloads or starts a speech asset on this path. What it buys is a model that
+hears prosody, hesitation and proper nouns that a recognizer has already
+flattened into text.
+
+**`VoiceSegmenter`, an energy-based VAD.** `SegmentGate` cuts on sentence
+structure in recognized text, which on the omni path does not exist until after
+the cut has been made, so boundaries have to come from the signal instead. It is
+deliberately not a trained VAD: a meeting tap carries one speaker at a time
+through a clean digital path with no room noise, so short-term energy against a
+rolling noise floor separates speech from silence well enough and costs no
+model, no asset and no inference on the audio thread. Non-speech transients are
+handled downstream, by the model returning no text.
+
+**`WAVEncoder`.** Qwen takes audio as a base64 blob with a declared container,
+so each utterance carries its own RIFF header. WAV rather than a compressed
+format because the encoder is twenty lines, where routing through `AVAudioFile`
+for AAC would mean a temporary file per utterance in the live path.
+
+**`--omni-test [file.wav]`, `--omni-model <id>`.** Everything about the omni
+request that can be wrong -- model ID, region, the `data:;base64,` prefix, the
+key's namespace -- fails in `--omni-test` with the server's own message rather
+than as an empty subtitle pane during a meeting. With no file it sends one
+second of silence, which still proves auth, region and framing. Model IDs here
+churn (`qwen3-omni-flash`, `qwen3.5-omni-flash`), so the ID is a defaults key
+rather than a constant.
+
+### Changed
+
+`--compare` and `--translate-text` now exclude audio-native backends rather than
+showing them fail: they cannot be driven from text fixtures at all.
+
+### Known limitations
+
+**The omni path has not been run against the live API.** The request shape is
+confirmed only as far as authentication -- the endpoint accepts and parses it --
+and the WAV framing and VAD segmentation are covered by their own checks. The
+round trip itself, and therefore the model ID default, is unverified. Run
+`--omni-test` before a meeting depends on it.
+
+**`qwenOmni` gives up four things the recognizer-driven paths provide**, and
+they are structural, not missing work: no Japanese transcript (nothing
+transcribes the source, so rows carry an empty source field and a copied
+transcript holds English only), no `hearing` preview (that line is fed by a
+recognizer's partial results), no auto-detect (`LanguagePicker` arbitrates
+between two recognizers and there are none), and **meeting audio leaves the
+machine**. The "no cloud STT" property in the README header does not hold on
+this path. Every other backend still transcribes on device and sends text at
+most.
+
 ## [0.1.0] - 2026-09-16
 
 First tagged release. Live Japanese to English meeting subtitles, running
@@ -94,5 +155,6 @@ The English-detection thresholds are unfitted (above). Sandboxing is off
 deliberately: without a provisioning profile it fights the process-tap and
 aggregate-device path for no benefit in a local build.
 
-[Unreleased]: https://github.com/dautroc/tsuyaku/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/dautroc/tsuyaku/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/dautroc/tsuyaku/releases/tag/v0.2.0
 [0.1.0]: https://github.com/dautroc/tsuyaku/releases/tag/v0.1.0

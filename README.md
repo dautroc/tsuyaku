@@ -13,7 +13,7 @@ virtual audio driver, no Xcode.
 | M0 build + signing harness | done, verified |
 | M1 audio capture | done, verified |
 | M2 on-device transcription | done, verified |
-| M3 translation pipeline | three backends; DeepSeek is the default when a key exists |
+| M3 translation pipeline | four text backends + one audio-native; DeepSeek is the default when a key exists |
 | M4 floating subtitle UI | done |
 | M5 polish | partial (transcript copy, settings persistence, device-loss recovery) |
 | M6 automatic English detection | built and tested; thresholds not yet fitted on a real meeting, so it ships **off** |
@@ -215,6 +215,58 @@ from the suggested split before turning the feature on.
 | `apple` | ~40ms | free | On device, offline. No view of the conversation, so it is literal on keigo and cannot recover omitted subjects. |
 | `deepseek` | ~800ms | ~2-4c | `deepseek-flash`. Best quality/cost balance. |
 | `anthropic` | untested | ~15c | `claude-haiku-4-5`. Needs a Console key. |
+| `qwenOmni` | untested | ~35c (est.) | Speech straight to English -- no transcription step. Cloud. See below. |
+
+### Qwen Omni: audio in, English out
+
+`qwenOmni` is the one backend that is not a `Translator`. It implements
+`AudioTranslator` and takes the captured utterance as a WAV blob, so
+`SpeechAnalyzer` is not in the graph at all. `PipelineController` branches on
+`TranslationProvider.isAudioNative` before it builds a transcriber:
+
+```
+tap -> VoiceSegmenter (energy VAD) -> QwenOmniTranslator -> store
+```
+
+What this buys is a model that hears prosody, hesitation and proper nouns that
+a recognizer has already flattened into text. What it costs, beyond money:
+
+- **No Japanese transcript.** Nothing transcribes the source, so rows carry an
+  empty source field and a copied transcript holds English only.
+- **No `hearing` preview.** That line is fed by a recognizer's partial results.
+- **No auto-detect.** `LanguagePicker` arbitrates between two recognizers and
+  there are none; the model handles mixed-language speech itself.
+- **Meeting audio leaves the machine.** The "no cloud STT" property in the
+  header of this file does not hold on this path. Every other backend still
+  transcribes on device and sends text at most.
+
+Segmentation moves from `SegmentGate` (which cuts on sentence structure in
+recognized text) to `VoiceSegmenter` (which cuts on silence), because on this
+path there is no text until after the cut has been made.
+
+Two Qwen-specific wire details, both load-bearing:
+
+- `input_audio.data` must carry a `data:;base64,` prefix. Plain base64 -- what
+  the OpenAI schema specifies and what OpenAI's own SDKs send -- is rejected
+  (pydantic/pydantic-ai#3530).
+- `stream` must be `true`; the omni tier refuses unary requests.
+
+`modalities: ["text"]` is also not cosmetic: at the default the model
+synthesises speech as well, billed far above the text output rate.
+
+Model IDs here churn (`qwen3-omni-flash`, `qwen3.5-omni-flash`), so the ID is a
+defaults key rather than a constant:
+
+```bash
+./build/Tsuyaku.app/Contents/MacOS/Tsuyaku --set-key qwenOmni <dashscope-key>
+./build/Tsuyaku.app/Contents/MacOS/Tsuyaku --omni-model qwen3.5-omni-flash
+./build/Tsuyaku.app/Contents/MacOS/Tsuyaku --omni-test sample.wav   # verify the wire format
+```
+
+`--omni-test` with no file sends one second of silence, which still proves auth,
+region and framing. The endpoint defaults to Singapore
+(`dashscope-intl.aliyuncs.com`); a key issued in the Beijing namespace will 401
+against it.
 
 Anthropic and DeepSeek share one client, `MessagesAPITranslator`: DeepSeek
 serves the Anthropic Messages wire format at `api.deepseek.com/anthropic`,

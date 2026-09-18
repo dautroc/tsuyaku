@@ -16,6 +16,7 @@ final class PipelineController {
 
     private var tap: SystemAudioTap?
     private var transcribers: [AppleTranscriber] = []
+    private var segmenter: VoiceSegmenter?
     private var tasks: [Task<Void, Never>] = []
 
     /// Recent (source, translated) pairs handed to the translator as context.
@@ -32,6 +33,15 @@ final class PipelineController {
 
         do {
             let glossary = settings.glossary
+
+            // The omni backend consumes audio directly, so it needs no
+            // transcription graph at all -- and must not build one, since
+            // `TranscriberFactory.make` downloads and starts `SpeechAnalyzer`
+            // assets that would then sit idle.
+            if settings.provider.isAudioNative {
+                try await startAudioNative(glossary: glossary)
+                return
+            }
 
             // Prepared BEFORE the tap exists, because `SystemAudioTap` fixes its
             // output format at init and the device-recovery path reuses it --
@@ -136,6 +146,94 @@ final class PipelineController {
         }
     }
 
+    /// Speech straight to the target language, with no recognizer in between.
+    ///
+    ///   tap -> segmenter (VAD) -> omni -> store
+    ///
+    /// Three things the Apple-STT branches provide are structurally absent
+    /// here and are handled rather than faked:
+    ///
+    ///   - **No source text.** Nothing transcribes the Japanese, so rows carry
+    ///     an empty source and the transcript copy holds English only.
+    ///   - **No `hearing` preview.** The partial-result stream that feeds it is
+    ///     a recognizer feature; the status line says "Listening" throughout
+    ///     instead of flickering text that would never arrive.
+    ///   - **No auto-detect.** `LanguagePicker` arbitrates between two
+    ///     recognizers, and there are none. The model handles mixed-language
+    ///     speech itself, so the setting is simply inert on this path.
+    private func startAudioNative(glossary: Glossary) async throws {
+        guard let translator = settings.provider.makeAudioTranslator(glossary: glossary) else {
+            throw AudioNativeError.noKey
+        }
+
+        // Nobody negotiates a format on this path, so the tap is pinned to what
+        // the encoder and the model both want.
+        let tap = SystemAudioTap(bundleIDs: settings.targetBundleIDs,
+                                 outputFormat: WAVEncoder.captureFormat) { [weak self] event in
+            Task { @MainActor in self?.handleRecovery(event) }
+        }
+        var config = VoiceSegmenter.Config()
+        config.maximumUtterance = .seconds(settings.maxLatencySeconds)
+        let segmenter = VoiceSegmenter(config: config,
+                                       sampleRate: WAVEncoder.captureFormat.sampleRate)
+
+        try tap.start()
+        self.tap = tap
+        self.segmenter = segmenter
+        store.autoDetecting = false
+        store.activeLanguage = nil
+
+        tasks = [
+            Task { for await chunk in tap.buffers { await segmenter.feed(chunk) } },
+            Task { await self.consume(segmenter.utterances, using: translator) },
+        ]
+
+        store.isRunning = true
+        store.status = "Listening"
+        log.info("pipeline started (omni, \(Settings.omniModel, privacy: .public))")
+    }
+
+    private func consume(_ utterances: AsyncStream<VoiceSegmenter.Utterance>,
+                         using translator: any AudioTranslator) async {
+        for await utterance in utterances {
+            store.activeLanguage = .ja
+            // Source is empty: see the note on `startAudioNative`. `provisional`
+            // is false because a VAD cut is final -- unlike a recognizer's
+            // hypothesis, it will never be revised.
+            store.beginLine(utterance: utterance.id, source: "",
+                            provisional: false, language: .ja)
+
+            var accumulated = ""
+            for await delta in translator.translate(audio: utterance.audio, context: history.map(\.target)) {
+                switch delta {
+                case .text(let t):
+                    accumulated += t
+                    store.append(utterance: utterance.id, delta: t)
+                case .failed(let message):
+                    store.fail(utterance: utterance.id, message: "translation failed: \(message)")
+                case .done:
+                    break
+                }
+            }
+            store.finishLine(utterance: utterance.id)
+            store.settle(utterance: utterance.id)
+
+            if !accumulated.isEmpty {
+                history.append(("", accumulated))
+                if history.count > settings.contextTurns {
+                    history.removeFirst(history.count - settings.contextTurns)
+                }
+            }
+        }
+    }
+
+    enum AudioNativeError: Error, LocalizedError {
+        case noKey
+        var errorDescription: String? {
+            "no Model Studio key -- run: --set-key qwenOmni <key>"
+        }
+    }
+
     /// Drives the gates' early-flush timers for turns that never pause.
     private func tickForever(_ body: @Sendable @escaping () async -> Void) async {
         while !Task.isCancelled {
@@ -149,6 +247,9 @@ final class PipelineController {
         tap = nil
         let engines = transcribers
         transcribers = []
+        let vad = segmenter
+        segmenter = nil
+        if let vad { Task { await vad.finish() } }
         tasks.forEach { $0.cancel() }
         tasks.removeAll()
         Task { for e in engines { await e.finish() } }
