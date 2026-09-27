@@ -265,8 +265,10 @@ is what resolves those; a sentence-at-a-time NMT model cannot.
 window gets no edge-drag resize from `.resizable`, so dropping it would cost the
 panel its resize handles. `.fullSizeContentView` reclaims that height for the
 content, and the standard window buttons are hidden because they would float
-over the header -- which is why "Hide Panel" in the menu is the only way to put
-it away.
+over the header. The panel therefore has no controls of its own. It lives and
+dies with a session: it stays hidden at launch, "Start Subtitles" shows it, and
+"Stop Subtitles" hides it again. The history survives a stop and is only wiped
+by "Clear". A failed start leaves the panel up so the error stays readable.
 
 **`setFrameAutosaveName` saves a frame but never restores one.** For a window
 built in code nothing reads it back; that needs an explicit `setFrameUsingName`.
@@ -281,7 +283,7 @@ partner of `recoverIfOffScreen()`, which runs on
 `contentMinSize` is the floor, not the SwiftUI layout: an `NSHostingView` will
 let the frame shrink past its content and simply clip it.
 
-**Nothing reads the keychain before the panel is up.** `hasKey` is a
+**Nothing reads the keychain before the menu bar item is up.** `hasKey` is a
 `SecItemCopyMatching` hiding behind a computed property, and `Settings.load()`
 asks it twice (choosing a first-run provider, then checking the chosen one still
 has its key). That call used to run as a property initializer on `AppDelegate`,
@@ -293,12 +295,14 @@ subtitle window, which reads exactly like a failed launch. It was diagnosed with
 `sample`, which caught the main thread parked in `AppDelegate.init` half a minute
 after launch.
 
-So the panel is created and ordered front first, the status item goes up on a
-bare "Starting…" menu that needs no keychain, and `Settings.load()` runs in a
+So the status item goes up first on a bare "Starting…" menu that needs no
+keychain (the panel is built too, but stays hidden until subtitles start), and
+`Settings.load()` runs in a
 detached task. The set of providers that have keys is cached from that same
 task, because `buildMenu()` asks `hasKey` of every provider and the menu is
 rebuilt on every provider change. Verified by injecting an 8-second sleep into
-`Settings.load()`: the panel renders at 3 seconds, fully laid out.
+`Settings.load()`: the panel rendered at 3 seconds, fully laid out, back when
+it was shown at launch.
 
 A key added with `--set-key` while the app is running therefore needs a restart
 to appear ungreyed in the menu. It already needed one in practice -- `--set-key`
