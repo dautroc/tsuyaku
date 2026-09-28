@@ -41,6 +41,17 @@ struct Settings: Sendable {
         static let contextTurns = "contextTurns"
         static let provider = "translationProvider"
         static let glossary = "glossary"
+        static let omniModel = "omniModel"
+    }
+
+    /// Which Qwen omni model ID to call. A defaults key rather than a stored
+    /// property because it is set once from the CLI and read from
+    /// `TranslationProvider`, which has no `Settings` in hand -- and because
+    /// Alibaba retires omni model IDs often enough that a wrong one has to be
+    /// fixable without a rebuild.
+    static var omniModel: String {
+        get { UserDefaults.standard.string(forKey: Key.omniModel) ?? QwenOmniTranslator.defaultModel }
+        set { UserDefaults.standard.set(newValue, forKey: Key.omniModel) }
     }
 
     static func load() -> Settings {

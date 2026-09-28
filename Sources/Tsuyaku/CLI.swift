@@ -18,8 +18,10 @@ enum CLI {
       --probe                     report framework/model/asset status
       --install-assets            download the on-device speech model (see --locale)
       --apple-preflight           check the Apple ja->en translation model
-      --set-key <provider> <key>  store a key (provider: anthropic | deepseek)
-      --provider <name>           apple | foundation | ollama | anthropic | deepseek (default: saved setting)
+      --set-key <provider> <key>  store a key (provider: anthropic | deepseek | qwenOmni)
+      --provider <name>           apple | foundation | ollama | anthropic | deepseek | qwenOmni (default: saved setting)
+      --omni-model <id>           Qwen omni model ID (default: qwen3-omni-flash)
+      --omni-test [file.wav]      send one WAV to Qwen omni and print the reply
       --locale <bcp47>            speech locale for --listen / --install-assets (default: ja-JP)
       --compare                   run every configured backend over a Japanese fixture set
       --capture [bundle|global] [s]   dump captured audio to /tmp/tsuyaku-capture.wav
@@ -266,7 +268,7 @@ enum CLI {
             guard CommandLine.arguments.count > i+2,
                   let provider = TranslationProvider(rawValue: CommandLine.arguments[i+1]),
                   let account = provider.keychainAccount else {
-                print("usage: --set-key <anthropic|deepseek> <key>"); exit(1)
+                print("usage: --set-key <anthropic|deepseek|qwenOmni> <key>"); exit(1)
             }
             let ok = Keychain.write(CommandLine.arguments[i+2], account: account)
             print(ok ? "\(provider.displayName) key stored in login keychain."
@@ -274,10 +276,71 @@ enum CLI {
             exit(0)
         }
 
+        if let i = CommandLine.arguments.firstIndex(of: "--omni-model"),
+           CommandLine.arguments.count > i+1 {
+            Settings.omniModel = CommandLine.arguments[i+1]
+            print("omni model set to \(Settings.omniModel)")
+            if !CommandLine.arguments.contains("--omni-test") { exit(0) }
+        }
+
+        // The wire-format check. Everything about the omni request that can be
+        // wrong -- the model ID, the region, the `data:;base64,` prefix, the
+        // key's namespace -- fails here with the server's own message, rather
+        // than as an empty subtitle pane during a meeting.
+        if let i = CommandLine.arguments.firstIndex(of: "--omni-test") {
+            guard let key = Keychain.read(account: "dashscope") else {
+                print("no key -- run: --set-key qwenOmni <key>"); exit(1)
+            }
+            let path = CommandLine.arguments.count > i+1
+                && !CommandLine.arguments[i+1].hasPrefix("--")
+                ? CommandLine.arguments[i+1] : nil
+
+            let audio: Data
+            if let path {
+                guard let d = FileManager.default.contents(atPath: path) else {
+                    print("cannot read \(path)"); exit(1)
+                }
+                audio = d
+            } else {
+                // A second of silence still exercises the whole request path;
+                // the model returns nothing, which is the documented behaviour
+                // for speechless audio and still proves auth and framing.
+                guard let buffer = AVAudioPCMBuffer(pcmFormat: WAVEncoder.captureFormat,
+                                                    frameCapacity: 16_000),
+                      let d = { buffer.frameLength = 16_000
+                                return WAVEncoder.encode([buffer]) }() else {
+                    print("could not synthesise test audio"); exit(1)
+                }
+                print("no file given -- sending 1s of silence (expect an empty reply)")
+                audio = d
+            }
+
+            let t = QwenOmniTranslator(apiKey: key, model: Settings.omniModel)
+            print("model:    \(Settings.omniModel)")
+            print("endpoint: \(QwenOmniTranslator.defaultEndpoint.absoluteString)")
+            print("audio:    \(audio.count) bytes")
+            let started = ContinuousClock.now
+            var out = "", failure: String?
+            for await delta in t.translate(audio: audio, context: []) {
+                switch delta {
+                case .text(let x):   out += x
+                case .failed(let m): failure = m
+                case .done:          break
+                }
+            }
+            if let failure { print("FAILED: \(failure)"); exit(1) }
+            print("EN \(out.isEmpty ? "(empty)" : out)   [\(started.duration(to: .now))]")
+            exit(0)
+        }
+
         if let i = CommandLine.arguments.firstIndex(of: "--translate-text") {
             let text = CommandLine.arguments.count > i+1 ? CommandLine.arguments[i+1]
                                                          : "それでは本日の定例会議を始めます。"
             let provider = selectedProvider() ?? .apple
+            if provider.isAudioNative {
+                print("\(provider.rawValue) takes audio, not text -- use --omni-test <file.wav>")
+                exit(1)
+            }
             if let why = provider.unusableReason {
                 print("\(provider.rawValue) is not usable: \(why)"); exit(1)
             }
@@ -293,8 +356,10 @@ enum CLI {
         // only honest way to answer "is provider X good enough for my meetings".
         if CommandLine.arguments.contains("--compare") {
             let fixtures = Fixtures.japaneseMeetingUtterances
-            let available = TranslationProvider.allCases.filter(\.isUsable)
-            for p in TranslationProvider.allCases where !p.isUsable {
+            // Audio-native backends cannot be compared on text fixtures at
+            // all, so they are excluded rather than shown failing.
+            let available = TranslationProvider.allCases.filter { $0.isUsable && !$0.isAudioNative }
+            for p in TranslationProvider.allCases where !p.isUsable && !p.isAudioNative {
                 print("skipping \(p.rawValue): \(p.unusableReason ?? "unusable")")
             }
             // Load the on-device LLM's weights before timing, or the first
