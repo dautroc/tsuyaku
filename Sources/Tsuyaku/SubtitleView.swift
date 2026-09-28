@@ -105,7 +105,6 @@ struct SubtitleView: View {
                                     Text(line.source)
                                         .font(.system(size: 15, weight: .medium))
                                         .foregroundStyle(line.failed ? .orange : .white)
-                                        .textSelection(.enabled)
                                 } else {
                                     Text(line.source)
                                         .font(.system(size: 12))
@@ -113,7 +112,6 @@ struct SubtitleView: View {
                                     Text(line.target.isEmpty ? " " : line.target)
                                         .font(.system(size: 15, weight: .medium))
                                         .foregroundStyle(line.failed ? .orange : .white)
-                                        .textSelection(.enabled)
                                 }
                             }
                             .frame(maxWidth: .infinity, alignment: .leading)
