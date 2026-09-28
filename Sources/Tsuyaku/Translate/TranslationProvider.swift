@@ -7,6 +7,7 @@ enum TranslationProvider: String, CaseIterable, Sendable, Codable {
     case ollama
     case anthropic
     case deepseek
+    case opencodeGo
     case qwenOmni
 
     var displayName: String {
@@ -16,6 +17,7 @@ enum TranslationProvider: String, CaseIterable, Sendable, Codable {
         case .ollama:     "Ollama (\(OllamaTranslator.defaultModel))"
         case .anthropic:  "Claude (claude-haiku-4-5)"
         case .deepseek:   "DeepSeek (deepseek-flash)"
+        case .opencodeGo: "OpenCode Go (\(Settings.opencodeModel))"
         case .qwenOmni:   "Qwen Omni (speech \u{2192} English, cloud)"
         }
     }
@@ -26,6 +28,7 @@ enum TranslationProvider: String, CaseIterable, Sendable, Codable {
         case .apple, .foundation, .ollama: nil
         case .anthropic:          "anthropic"
         case .deepseek:           "deepseek"
+        case .opencodeGo:         "opencodeGo"
         case .qwenOmni:           "dashscope"
         }
     }
@@ -55,7 +58,7 @@ enum TranslationProvider: String, CaseIterable, Sendable, Codable {
                 : FoundationModelTranslator.describe(FoundationModelTranslator.availability)
         case .ollama:
             return OllamaTranslator.probe()
-        case .anthropic, .deepseek, .qwenOmni:
+        case .anthropic, .deepseek, .opencodeGo, .qwenOmni:
             return hasKey ? nil : "no key -- run: --set-key \(rawValue) <key>"
         }
     }
@@ -104,6 +107,9 @@ enum TranslationProvider: String, CaseIterable, Sendable, Codable {
         case .deepseek:
             guard let key = Keychain.read(account: "deepseek") else { return AppleTranslator() }
             return MessagesAPITranslator.deepSeek(apiKey: key, glossary: glossary)
+        case .opencodeGo:
+            guard let key = Keychain.read(account: "opencodeGo") else { return AppleTranslator() }
+            return MessagesAPITranslator.opencodeGo(apiKey: key, model: Settings.opencodeModel, glossary: glossary)
         case .qwenOmni:
             // Unreachable on the omni path, which never builds a `Translator`
             // -- see `isAudioNative`. Reached only if the key vanished between

@@ -51,7 +51,7 @@ flowchart TB
         Apple["AppleTranslator<br/>on-device NMT"]
         Foundation["FoundationModelTranslator<br/>Apple Intelligence"]
         Ollama["OllamaTranslator<br/>local LLM"]
-        Messages["MessagesAPITranslator<br/>Claude / DeepSeek"]
+        Messages["MessagesAPITranslator<br/>Claude / DeepSeek / OpenCode Go"]
     end
 
     subgraph AudioTranslate["Audio-native translation"]
@@ -105,7 +105,7 @@ flowchart TB
 
 `PipelineController` decides at startup which branch to build:
 
-- Text providers (`apple`, `foundation`, `ollama`, `anthropic`, `deepseek`) build an `AppleTranscriber`-based graph.
+- Text providers (`apple`, `foundation`, `ollama`, `anthropic`, `deepseek`, `opencodeGo`) build an `AppleTranscriber`-based graph.
 - The audio-native provider (`qwenOmni`) builds a `VoiceSegmenter`-based graph instead and bypasses speech recognition.
 
 ---
@@ -403,6 +403,7 @@ classDiagram
         ollama
         anthropic
         deepseek
+        opencodeGo
         qwenOmni
         +String? keychainAccount
         +Bool needsKey
@@ -462,6 +463,7 @@ flowchart TB
     subgraph Keychain["Keychain"]
         AnthropicKey["anthropic"]
         DeepSeekKey["deepseek"]
+        OpenCodeGoKey["opencodeGo"]
         DashscopeKey["dashscope"]
     end
 
@@ -471,6 +473,7 @@ flowchart TB
         Ollama["ollama"]
         Anthropic["anthropic"]
         DeepSeek["deepseek"]
+        OpenCodeGo["opencodeGo"]
         QwenOmni["qwenOmni"]
     end
 
@@ -490,11 +493,14 @@ flowchart TB
     Anthropic --> MAT
     DeepSeek -->|read key| DeepSeekKey
     DeepSeek --> MAT
+    OpenCodeGo -->|read key| OpenCodeGoKey
+    OpenCodeGo --> MAT
     QwenOmni -->|read key| DashscopeKey
     QwenOmni --> QT
 
     MAT -->|api.anthropic.com| AnthropicCloud["Anthropic Messages API"]
     MAT -->|api.deepseek.com/anthropic| DeepSeekCloud["DeepSeek Anthropic-compatible API"]
+    MAT -->|opencode.ai/zen/go| OpenCodeGoCloud["OpenCode Go Messages API"]
     QT -->|dashscope-intl.aliyuncs.com| QwenCloud["Qwen Omni API"]
     OT -->|127.0.0.1:11434| OllamaServer["Ollama server"]
     AT -->|Apple Translation framework| OnDeviceNMT["On-device NMT model"]
@@ -562,6 +568,7 @@ flowchart LR
     subgraph Keychain["Keychain"]
         Anthropic["anthropic"]
         DeepSeek["deepseek"]
+        OpenCodeGo["opencodeGo"]
         Dashscope["dashscope"]
     end
 
