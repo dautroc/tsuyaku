@@ -42,6 +42,7 @@ struct Settings: Sendable {
         static let provider = "translationProvider"
         static let glossary = "glossary"
         static let omniModel = "omniModel"
+        static let opencodeModel = "opencodeModel"
     }
 
     /// Which Qwen omni model ID to call. A defaults key rather than a stored
@@ -52,6 +53,14 @@ struct Settings: Sendable {
     static var omniModel: String {
         get { UserDefaults.standard.string(forKey: Key.omniModel) ?? QwenOmniTranslator.defaultModel }
         set { UserDefaults.standard.set(newValue, forKey: Key.omniModel) }
+    }
+
+    /// Which OpenCode Go model ID to call. Like `omniModel`, this is a
+    /// defaults key so the provider menu and CLI can read it without a
+    /// `Settings` instance.
+    static var opencodeModel: String {
+        get { UserDefaults.standard.string(forKey: Key.opencodeModel) ?? "deepseek-v4.1-flash" }
+        set { UserDefaults.standard.set(newValue, forKey: Key.opencodeModel) }
     }
 
     static func load() -> Settings {

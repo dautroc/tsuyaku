@@ -1,0 +1,1 @@
+- Always update @docs/archiecture.md if there are any changes affect the archiecture of this program

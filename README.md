@@ -41,7 +41,7 @@ make test
 | Feature | Description |
 |---|---|
 | On-device speech recognition | Japanese `ja-JP` recognition using Apple's `Speech` framework; free, offline, and private. |
-| Real-time translation | Three backends: Apple (on-device, free), DeepSeek (`deepseek-flash`, default when a key is set), and Anthropic (`claude-haiku-4-5`). |
+| Real-time translation | Four backends: Apple (on-device, free), DeepSeek (`deepseek-flash`), Anthropic (`claude-haiku-4-5`), and OpenCode Go (`deepseek-v4.1-flash`, default when a key is set). |
 | Core Audio process taps | Captures meeting audio without screen recording, virtual cables, or echo cancellation. |
 | Floating subtitle panel | Resizable subtitle window shown/hidden from the menu bar. |
 | Automatic English detection | Optional concurrent `en-US` recognizer shows English turns verbatim; off by default. |
@@ -52,3 +52,5 @@ Choose a backend from the menu bar or with `--provider`. Store API keys in the k
 ```bash
 ./build/Tsuyaku.app/Contents/MacOS/Tsuyaku --set-key <provider> <key>
 ```
+
+Supported key-backed providers: `anthropic`, `deepseek`, `opencodeGo`, `qwenOmni`. Use `--opencode-model <id>` to pick a different OpenCode Go model.

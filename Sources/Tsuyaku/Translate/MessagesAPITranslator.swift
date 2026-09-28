@@ -29,6 +29,7 @@ struct MessagesAPITranslator: Translator {
     let glossary: Glossary
     let sourceName: String
     let targetName: String
+    let sessionID: String?
 
     init(apiKey: String,
          endpoint: URL,
@@ -37,7 +38,8 @@ struct MessagesAPITranslator: Translator {
          disableThinking: Bool = false,
          glossary: Glossary = .empty,
          sourceName: String = "Japanese",
-         targetName: String = "English") {
+         targetName: String = "English",
+         sessionID: String? = nil) {
         self.apiKey = apiKey
         self.endpoint = endpoint
         self.model = model
@@ -46,6 +48,7 @@ struct MessagesAPITranslator: Translator {
         self.glossary = glossary
         self.sourceName = sourceName
         self.targetName = targetName
+        self.sessionID = sessionID
     }
 
     static func anthropic(apiKey: String, glossary: Glossary = .empty) -> MessagesAPITranslator {
@@ -64,6 +67,19 @@ struct MessagesAPITranslator: Translator {
                               providerName: "DeepSeek (deepseek-flash)",
                               disableThinking: true,
                               glossary: glossary)
+    }
+
+    static func opencodeGo(apiKey: String,
+                           model: String = "deepseek-v4.1-flash",
+                           glossary: Glossary = .empty,
+                           sessionID: String = UUID().uuidString) -> MessagesAPITranslator {
+        MessagesAPITranslator(apiKey: apiKey,
+                              endpoint: URL(string: "https://opencode.ai/zen/go/v1/messages")!,
+                              model: model,
+                              providerName: "OpenCode Go (\(model))",
+                              disableThinking: true,
+                              glossary: glossary,
+                              sessionID: sessionID)
     }
 
     private var systemPrompt: String {
@@ -126,6 +142,7 @@ struct MessagesAPITranslator: Translator {
         request.setValue(apiKey,             forHTTPHeaderField: "x-api-key")
         request.setValue("2023-06-01",       forHTTPHeaderField: "anthropic-version")
         request.setValue("application/json", forHTTPHeaderField: "content-type")
+        if let sessionID { request.setValue(sessionID, forHTTPHeaderField: "x-opencode-session") }
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         request.timeoutInterval = 30
 
