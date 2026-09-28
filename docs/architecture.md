@@ -2,20 +2,21 @@
 
 Tsuyaku is a macOS menu-bar app that captures another application's audio output, transcribes it on-device with Apple's `SpeechAnalyzer`, translates the recognized Japanese into English, and renders the result as a floating, always-on-top subtitle panel.
 
-This document describes the architecture using Mermaid diagrams. All diagrams are also rendered as PNGs in [`docs/assets/`](./assets/) for quick reference.
+A second backend family, **Qwen Omni**, skips transcription entirely and translates straight from audio to English text.
 
 ---
 
 ## Table of contents
 
 1. [High-level data flow](#1-high-level-data-flow)
-2. [Runtime pipeline single-language mode](#2-runtime-pipeline-single-language-mode)
-3. [Runtime pipeline auto-detect mode](#3-runtime-pipeline-auto-detect-mode)
-4. [Component responsibilities](#4-component-responsibilities)
-5. [Translation provider hierarchy](#5-translation-provider-hierarchy)
-6. [Audio capture and recovery](#6-audio-capture-and-recovery)
-7. [Configuration and secrets](#7-configuration-and-secrets)
-8. [CLI diagnostics](#8-cli-diagnostics)
+2. [Runtime pipeline (single-language STT)](#2-runtime-pipeline-single-language-stt)
+3. [Runtime pipeline (auto-detect STT)](#3-runtime-pipeline-auto-detect-stt)
+4. [Runtime pipeline (audio-native Qwen Omni)](#4-runtime-pipeline-audio-native-qwen-omni)
+5. [Component responsibilities](#5-component-responsibilities)
+6. [Translation provider hierarchy](#6-translation-provider-hierarchy)
+7. [Audio capture and recovery](#7-audio-capture-and-recovery)
+8. [Configuration and secrets](#8-configuration-and-secrets)
+9. [CLI diagnostics](#9-cli-diagnostics)
 
 ---
 
@@ -32,24 +33,29 @@ flowchart TB
         Converter["FormatConverter"]
     end
 
-    subgraph Speech["On-device speech recognition"]
+    subgraph STT["On-device speech recognition<br/>(text backends)"]
         Factory["TranscriberFactory"]
         JaSTT["AppleTranscriber<br/>ja-JP"]
         EnSTT["AppleTranscriber<br/>en-US"]
     end
 
     subgraph Pipeline["Pipeline"]
-        GateJa["SegmentGate<br/>Japanese"]
-        GateEn["SegmentGate<br/>English"]
-        Picker["LanguagePicker<br/>auto-detect"]
+        JaGate["SegmentGate<br/>Japanese"]
+        EnGate["SegmentGate<br/>English"]
+        Picker["LanguagePicker"]
+        Segmenter["VoiceSegmenter<br/>audio-native"]
     end
 
-    subgraph Translation["Translation backend"]
-        Provider["TranslationProvider"]
+    subgraph TextTranslate["Text translation backends"]
+        TextProvider["TranslationProvider"]
         Apple["AppleTranslator<br/>on-device NMT"]
         Foundation["FoundationModelTranslator<br/>Apple Intelligence"]
         Ollama["OllamaTranslator<br/>local LLM"]
         Messages["MessagesAPITranslator<br/>Claude / DeepSeek"]
+    end
+
+    subgraph AudioTranslate["Audio-native translation"]
+        Omni["QwenOmniTranslator<br/>speech → English"]
     end
 
     subgraph UI["User interface"]
@@ -63,25 +69,29 @@ flowchart TB
     Tap -->|raw buffers| Converter
     Converter -->|AudioChunk| Factory
 
-    Factory -->|single or dual| JaSTT
-    Factory -.->|when auto-detect| EnSTT
+    Factory -->|single| JaSTT
+    Factory -.->|dual / auto-detect| EnSTT
 
-    JaSTT -->|Segment| GateJa
-    EnSTT -->|Segment| GateEn
+    JaSTT -->|Segment| JaGate
+    EnSTT -->|Segment| EnGate
 
-    GateJa -->|Event| Picker
-    GateEn -->|Event| Picker
+    JaGate -->|Event| Picker
+    EnGate -->|Event| Picker
 
-    Picker -->|DecidedEvent| Provider
-    Provider --> Apple
-    Provider --> Foundation
-    Provider --> Ollama
-    Provider --> Messages
+    Picker -->|DecidedEvent| TextProvider
+    TextProvider --> Apple
+    TextProvider --> Foundation
+    TextProvider --> Ollama
+    TextProvider --> Messages
 
     Apple -->|TranslationDelta| Store
     Foundation -->|TranslationDelta| Store
     Ollama -->|TranslationDelta| Store
     Messages -->|TranslationDelta| Store
+
+    Converter -->|AudioChunk| Segmenter
+    Segmenter -->|Utterance WAV| Omni
+    Omni -->|TranslationDelta| Store
 
     Store --> View
     View --> Panel
@@ -93,11 +103,16 @@ flowchart TB
     AppDelegate -->|creates / toggles| PipelineController
 ```
 
+`PipelineController` decides at startup which branch to build:
+
+- Text providers (`apple`, `foundation`, `ollama`, `anthropic`, `deepseek`) build an `AppleTranscriber`-based graph.
+- The audio-native provider (`qwenOmni`) builds a `VoiceSegmenter`-based graph instead and bypasses speech recognition.
+
 ---
 
-## 2. Runtime pipeline (single-language mode)
+## 2. Runtime pipeline (single-language STT)
 
-When automatic English detection is **off**, one recognizer runs and every translatable segment is sent straight to the configured translator.
+When automatic English detection is **off**, one recognizer runs and every translatable segment is sent to the configured translator.
 
 ```mermaid
 sequenceDiagram
@@ -118,18 +133,21 @@ sequenceDiagram
     loop Segments emitted
         STT->>Gate: ingest(Segment)
         Gate->>Gate: split sentences, track watermark
-        opt complete sentence found
+        opt complete sentence or tail flush
             Gate->>PC: Event.translate(id, source, provisional)
-            PC->>Store: beginLine(utterance: id, source, language)
-            PC->>T: translate(source, context: history)
-            loop streaming deltas
-                T->>PC: .text(delta)
-                PC->>Store: append(utterance: id, delta)
-            end
-            T->>PC: .done
-            PC->>Store: finishLine(utterance: id)
-            opt accumulated target not empty
-                PC->>PC: append to history context
+            PC->>Store: beginLine(utterance: id, source, provisional, language)
+            alt language == .en
+                PC->>Store: finishLine(utterance: id)
+            else
+                PC->>T: translate(source, context: history)
+                loop streaming deltas
+                    T->>PC: .text(delta) / .failed(msg) / .done
+                    PC->>Store: append / fail
+                end
+                PC->>Store: finishLine(utterance: id)
+                opt non-empty target
+                    PC->>PC: append (source, target) to history
+                end
             end
         end
         opt utterance finalized
@@ -142,9 +160,11 @@ sequenceDiagram
     PC->>STT: finish()
 ```
 
+`SegmentGate` cuts only at sentence terminators so that partial Japanese clauses (SOV word order) are not translated before the verb arrives. A `maxLatency` backstop flushes the trailing fragment anyway.
+
 ---
 
-## 3. Runtime pipeline (auto-detect mode)
+## 3. Runtime pipeline (auto-detect STT)
 
 When automatic English detection is **on**, the same audio is fed to both a Japanese and an English recognizer. A `LanguagePicker` decides, per spoken turn, which recognizer to render.
 
@@ -174,9 +194,31 @@ flowchart LR
     style Store fill:#2d3e50,stroke:#2196f3
 ```
 
+Both gates ingest every segment so their sentence watermarks stay in sync. `LanguagePicker` uses `LanguageScore.japaneseness` to score the Japanese recognizer's text; English turns are shown verbatim without spending translation tokens. Each gate has its own tuning: Japanese uses a 7-second backstop and East-Asian terminators; English uses a 2.5-second backstop and ASCII terminators with abbreviation guards.
+
 ---
 
-## 4. Component responsibilities
+## 4. Runtime pipeline (audio-native Qwen Omni)
+
+The `qwenOmni` provider skips transcription. Audio is cut into utterances by an energy-based voice-activity detector and sent straight to Qwen Omni on Alibaba Cloud Model Studio.
+
+```mermaid
+flowchart LR
+    Tap["SystemAudioTap<br/>16 kHz mono"] -->|AudioChunk| Segmenter["VoiceSegmenter<br/>energy-based VAD"]
+    Segmenter -->|Utterance WAV| Omni["QwenOmniTranslator"]
+    Omni -->|TranslationDelta| Store["SubtitleStore"]
+    Store --> Panel["FloatingPanel / SubtitleView"]
+```
+
+On this path:
+
+- There is no source text; rows carry an empty source and the transcript copy holds English only.
+- There is no `hearing` preview, because partial hypotheses are a recognizer feature.
+- Auto-detect is inert; the model handles mixed-language speech itself.
+
+---
+
+## 5. Component responsibilities
 
 ```mermaid
 classDiagram
@@ -187,24 +229,35 @@ classDiagram
         +FloatingPanel panel
         +PipelineController controller
         +Settings settings
+        +TranslationDownloadHost downloadHost
         +Set~TranslationProvider~ providersWithKeys
+        +NSStatusItem statusItem
+        +AnyCancellable runningObserver
         +applicationDidFinishLaunching()
         +toggle()
         +buildMenu()
         +loadSettings()
+        +rebuildController()
+        +installModel()
+        +copyTranscript()
+        +clear()
     }
 
     class PipelineController {
         +SubtitleStore store
         +Settings settings
-        +SystemAudioTap tap
+        +SystemAudioTap? tap
         +[AppleTranscriber] transcribers
+        +VoiceSegmenter? segmenter
         +[Task] tasks
-        +start()
+        +start() async
         +stop()
         +handleRecovery(event)
-        -makeTranslator(glossary)
-        -consume(events, translator)
+        -startAudioNative(glossary)
+        -makeTranslator(glossary) any Translator
+        -consume(events, language, using translator)
+        -consume(decided, using translator)
+        -consume(utterances, using audioTranslator)
     }
 
     class SubtitleStore {
@@ -213,19 +266,26 @@ classDiagram
         +String hearing
         +Bool isRunning
         +String status
-        +String notice
-        +SpokenLanguage activeLanguage
+        +String? notice
+        +SpokenLanguage? activeLanguage
+        +Bool autoDetecting
+        +Int settledCount
         +beginLine(utterance:source:provisional:language)
         +append(utterance:delta)
+        +fail(utterance:message)
         +finishLine(utterance)
         +settle(utterance)
         +clear()
+        +flashNotice(text)
+        +headerLabel
+        +transcriptMarkdown
     }
 
     class FloatingPanel {
         +init(store)
         +orderFrontRegardless()
         +recoverIfOffScreen()
+        -positionAtBottomCentre()
     }
 
     class SubtitleView {
@@ -236,24 +296,37 @@ classDiagram
         +AsyncStream~AudioChunk~ buffers
         +start()
         +stop()
-        -buildGraph()
-        -teardownGraph()
-        -checkForStall()
+        -createTap()
+        -createAggregateDevice()
+        -installIOProc()
+        -addDefaultDeviceListener()
+        -devicesChanged()
         -rebuild(attempt)
+        -checkForStall()
+        +simulateCaptureLoss()
     }
 
     class TranscriberFactory {
-        +make(primary:secondary:...) Prepared
+        <<enum>>
+        +Prepared
+        +make(primary:secondary:primaryTerms:secondaryTerms:onProgress) Prepared
+        +sharedFormat(modules) AVAudioFormat?
     }
 
     class AppleTranscriber {
+        +AVAudioFormat inputFormat
+        +SpokenLanguage language
         +AsyncStream~Segment~ segments
-        +feed(AudioChunk)
+        +init(module, language, inputFormat, contextualStrings)
+        +init(locale, contextualStrings)
         +start()
+        +feed(AudioChunk)
         +finish()
+        +analyze(file)
     }
 
     class SegmentGate {
+        +GateConfig config
         +AsyncStream~Event~ events
         +AsyncStream~String~ hearing
         +ingest(Segment)
@@ -269,17 +342,56 @@ classDiagram
         +tick()
     }
 
+    class PickerState {
+        +Tuning tuning
+        +choose() Choice
+        +submit(Event, from, now) Outcome
+        +observe(Segment)
+        +tick(now)
+    }
+
+    class LanguageScore {
+        <<enum>>
+        +japaneseness(text) Double
+    }
+
     class Translator {
         <<protocol>>
         +translate(text, context) AsyncStream~TranslationDelta~
+    }
+
+    class AudioTranslator {
+        <<protocol>>
+        +translate(audio: Data, context: [String]) AsyncStream~TranslationDelta~
+    }
+
+    class VoiceSegmenter {
+        +Config config
+        +AsyncStream~Utterance~ utterances
+        +feed(AudioChunk)
+        +finish()
+    }
+
+    class QwenOmniTranslator {
+        +String apiKey
+        +URL endpoint
+        +String model
+        +translate(audio, context)
     }
 
     class Settings {
         +Locale sourceLocale
         +Locale secondaryLocale
         +Bool autoDetectLanguage
+        +Int englishMaxLatencyMillis
+        +Double languageThreshold
+        +Bool confidenceTiebreak
+        +[String] targetBundleIDs
+        +Int maxLatencySeconds
+        +Int contextTurns
         +TranslationProvider provider
         +Glossary glossary
+        +static String omniModel
         +load() Settings
         +save()
     }
@@ -291,24 +403,38 @@ classDiagram
         ollama
         anthropic
         deepseek
-        +isUsable
-        +makeTranslator(glossary) Translator
+        qwenOmni
+        +String? keychainAccount
+        +Bool needsKey
+        +Bool hasKey
+        +String? unusableReason
+        +Bool isAudioNative
+        +Bool isUsable
+        +makeTranslator(glossary) any Translator
+        +makeAudioTranslator(glossary) any AudioTranslator?
+    }
+
+    class TranslationDownloadHost {
+        +present()
     }
 
     class CLI {
-        +run()
+        +run() async
     }
 
     AppDelegate --> PipelineController
     AppDelegate --> SubtitleStore
     AppDelegate --> FloatingPanel
     AppDelegate --> Settings
+    AppDelegate --> TranslationDownloadHost
 
     PipelineController --> SystemAudioTap
     PipelineController --> AppleTranscriber
     PipelineController --> SegmentGate
     PipelineController --> LanguagePicker
     PipelineController --> Translator
+    PipelineController --> AudioTranslator
+    PipelineController --> VoiceSegmenter
     PipelineController --> SubtitleStore
 
     TranscriberFactory --> AppleTranscriber
@@ -316,24 +442,27 @@ classDiagram
     SegmentGate --> LanguagePicker
     LanguagePicker --> Translator
     Translator --> SubtitleStore
+    AudioTranslator --> SubtitleStore
     SubtitleStore --> SubtitleView
     SubtitleView --> FloatingPanel
 
     TranslationProvider ..> Translator
+    TranslationProvider ..> AudioTranslator
     Settings --> TranslationProvider
 ```
 
 ---
 
-## 5. Translation provider hierarchy
+## 6. Translation provider hierarchy
 
-The app ships with five translation backends. The user's choice is stored in `Settings`; secrets live in the Keychain.
+The app ships with six providers. The user's choice is stored in `Settings`; API keys live in the Keychain.
 
 ```mermaid
 flowchart TB
     subgraph Keychain["Keychain"]
         AnthropicKey["anthropic"]
         DeepSeekKey["deepseek"]
+        DashscopeKey["dashscope"]
     end
 
     subgraph Providers["TranslationProvider"]
@@ -342,6 +471,7 @@ flowchart TB
         Ollama["ollama"]
         Anthropic["anthropic"]
         DeepSeek["deepseek"]
+        QwenOmni["qwenOmni"]
     end
 
     subgraph Backends["Translator implementations"]
@@ -349,6 +479,7 @@ flowchart TB
         FMT["FoundationModelTranslator"]
         OT["OllamaTranslator"]
         MAT["MessagesAPITranslator"]
+        QT["QwenOmniTranslator"]
     end
 
     Apple --> AT
@@ -359,19 +490,24 @@ flowchart TB
     Anthropic --> MAT
     DeepSeek -->|read key| DeepSeekKey
     DeepSeek --> MAT
+    QwenOmni -->|read key| DashscopeKey
+    QwenOmni --> QT
 
     MAT -->|api.anthropic.com| AnthropicCloud["Anthropic Messages API"]
     MAT -->|api.deepseek.com/anthropic| DeepSeekCloud["DeepSeek Anthropic-compatible API"]
+    QT -->|dashscope-intl.aliyuncs.com| QwenCloud["Qwen Omni API"]
     OT -->|127.0.0.1:11434| OllamaServer["Ollama server"]
     AT -->|Apple Translation framework| OnDeviceNMT["On-device NMT model"]
     FMT -->|FoundationModels framework| AppleIntelligence["Apple Intelligence"]
 ```
 
+`TranslationProvider.isUsable` checks more than key presence: it probes Ollama reachability and Apple Intelligence availability so unavailable backends are greyed out in the menu instead of silently degrading.
+
 ---
 
-## 6. Audio capture and recovery
+## 7. Audio capture and recovery
 
-`SystemAudioTap` builds a Core Audio process tap and aggregate device, converts the audio to the recognizer's expected format, and survives output-device changes (for example, Bluetooth headphones disconnecting).
+`SystemAudioTap` builds a Core Audio process tap and aggregate device, converts the audio to the downstream format, and survives output-device changes (for example, Bluetooth headphones disconnecting).
 
 ```mermaid
 flowchart TB
@@ -383,7 +519,7 @@ flowchart TB
 
     Tap --> Aggregate --> IOProc
     IOProc -->|raw PCM| Converter["FormatConverter"]
-    Converter -->|AudioChunk| Downstream["AppleTranscriber"]
+    Converter -->|AudioChunk| Downstream["AppleTranscriber / VoiceSegmenter"]
 
     Watchdog["Watchdog timer<br/>stall detection"] -->|no buffer > 3s| Rebuild
     DeviceListener["Device-list listener"] -->|built-on device removed| Rebuild
@@ -399,26 +535,34 @@ flowchart TB
     Failure --> AppDelegate
 ```
 
+The tap can target a single bundle ID or all system audio except the app itself (`bundleIDs == []`). The `buffers` stream survives rebuilds; only `stop()` finishes it.
+
 ---
 
-## 7. Configuration and secrets
+## 8. Configuration and secrets
 
-User settings are persisted in `UserDefaults`. API keys are stored in the Keychain and are never written to defaults.
+User settings are persisted in `UserDefaults`. API keys are stored in the Keychain and are never written to defaults. On first launch, `Settings.load` prefers a configured cloud backend over the on-device Apple translator.
 
 ```mermaid
 flowchart LR
     subgraph UserDefaults["UserDefaults"]
         Locales["source / secondary locale"]
         Detect["autoDetectLanguage"]
+        EnglishLatency["englishMaxLatencyMillis"]
+        Threshold["languageThreshold"]
+        Tiebreak["confidenceTiebreak"]
+        Bundles["targetBundleIDs"]
         Provider["translationProvider"]
         Latency["maxLatencySeconds"]
         Context["contextTurns"]
         Glossary["glossary"]
+        OmniModel["omniModel"]
     end
 
     subgraph Keychain["Keychain"]
         Anthropic["anthropic"]
         DeepSeek["deepseek"]
+        Dashscope["dashscope"]
     end
 
     UserDefaults --> Settings["Settings.load() / save()"]
@@ -432,33 +576,42 @@ flowchart LR
 
 ---
 
-## 8. CLI diagnostics
+## 9. CLI diagnostics
 
 The same executable can run diagnostic subcommands instead of launching the GUI. These exercise one layer at a time and are useful for verifying setup.
 
 ```mermaid
 flowchart LR
-    CLI["CLI.run()"] --> Probe["--probe"]
+    CLI["CLI.run()"] --> Version["--version"]
+    CLI --> Probe["--probe"]
     CLI --> Install["--install-assets"]
     CLI --> Preflight["--apple-preflight"]
     CLI --> SetKey["--set-key"]
+    CLI --> Locale["--locale"]
+    CLI --> Provider["--provider"]
+    CLI --> OmniModel["--omni-model"]
+    CLI --> OmniTest["--omni-test"]
+    CLI --> Compare["--compare"]
     CLI --> Capture["--capture"]
     CLI --> Listen["--listen"]
     CLI --> ListenDual["--listen-dual"]
+    CLI --> ListenDualFile["--listen-dual-file"]
     CLI --> Pipeline["--pipeline"]
     CLI --> StoreSelfTest["--store-selftest"]
     CLI --> DeviceSwitchTest["--device-switch-test"]
     CLI --> TranslateText["--translate-text"]
-    CLI --> Compare["--compare"]
 
-    Probe --> CoreAudio["CoreAudioUtil"]
-    Probe --> Speech["SpeechAnalyzer"]
+    Probe --> CoreAudio["CoreAudioUtil / CATapDescription"]
+    Probe --> Speech["SpeechAnalyzer / AssetInventory"]
     Probe --> Translation["Translation framework"]
 
     Install --> AssetGate["AssetGate"]
     Listen --> SystemAudioTap["SystemAudioTap"]
     Listen --> AppleTranscriber["AppleTranscriber"]
+    ListenDual --> DualListenDiagnostic["DualListenDiagnostic"]
+    ListenDualFile --> DualListenDiagnostic
     Pipeline --> PipelineController["PipelineController"]
     StoreSelfTest --> SubtitleStore["SubtitleStore"]
     DeviceSwitchTest --> SystemAudioTap
+    OmniTest --> QwenOmniTranslator["QwenOmniTranslator"]
 ```
