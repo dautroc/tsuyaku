@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 import OSLog
 
@@ -19,8 +20,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// it of every provider, so leaving it uncached puts keychain I/O on the
     /// main thread every time the menu is rebuilt.
     private var providersWithKeys: Set<TranslationProvider> = []
+    private var runningObserver: AnyCancellable?
 
-    /// The panel goes up before anything reads the keychain.
+    /// The menu bar item goes up before anything reads the keychain.
     ///
     /// `Settings.load()` used to be a property initializer on this class, so it
     /// ran while `main.swift` was still constructing the delegate -- before
@@ -28,12 +30,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// first-run provider, then checking the chosen one still has its key), and
     /// a `SecItemCopyMatching` can take *seconds* the first time a rebuilt
     /// binary asks for an item the user granted to an earlier signature. For
-    /// that entire window there was a live process with a menu bar icon and no
-    /// subtitle window, which reads exactly like a failed launch.
+    /// that entire window there was a live process and nothing to show for it,
+    /// which reads exactly like a failed launch. The status item and its
+    /// "Starting…" menu are that feedback now.
+    ///
+    /// The panel is built here but stays hidden: it belongs to a running
+    /// session, so "Start Subtitles" shows it and "Stop Subtitles" puts it away.
     func applicationDidFinishLaunching(_ notification: Notification) {
         panel = FloatingPanel(store: store)
-        panel?.orderFrontRegardless()
         setUpStatusItem()
+        // `start()` flips `isRunning` after its awaits, and the pipeline can
+        // stop itself on failure, so the menu title follows the store rather
+        // than the click that asked for the change.
+        runningObserver = store.$isRunning
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                MainActor.assumeIsolated { self?.refreshMenuTitle() }
+            }
         // A display unplugged mid-meeting can strand a restored frame off any
         // screen. Same class of problem as a vanishing audio device: recover
         // rather than leave the user with nothing and no explanation.
@@ -86,40 +99,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// The menu before settings have loaded. Bare on purpose: every item it
     /// leaves out needs to know which providers have keys, and finding that out
-    /// means the keychain read we are keeping off this thread. The two items
-    /// that need nothing are here, so the app is never unquittable.
+    /// means the keychain read we are keeping off this thread. Quit needs
+    /// nothing, so the app is never unquittable.
     private func startingMenu() -> NSMenu {
         let menu = NSMenu()
         let starting = menu.addItem(withTitle: "Starting…", action: nil, keyEquivalent: "")
         starting.isEnabled = false
         menu.addItem(.separator())
-        let panelItem = menu.addItem(withTitle: "Hide Panel", action: #selector(togglePanel), keyEquivalent: "p")
-        panelItem.target = self
-        panelItem.tag = Tag.panel
-        menu.addItem(.separator())
         menu.addItem(withTitle: "Quit Tsuyaku", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         return menu
     }
 
-    /// Menu items are addressed by tag rather than by index: two of them
-    /// retitle themselves, and index arithmetic breaks the moment the menu
-    /// gains a row.
+    /// Menu items are addressed by tag rather than by index: the run item
+    /// retitles itself, and index arithmetic breaks the moment the menu gains
+    /// a row.
     private enum Tag {
         static let run = 1
-        static let panel = 2
     }
 
     private func buildMenu() -> NSMenu {
         let menu = NSMenu()
+        // The panel has no close button -- the standard window buttons would
+        // float over the header -- so this item both runs the pipeline and
+        // shows or hides the panel with it, and it has to say which way it goes.
         let run = menu.addItem(withTitle: "Start Subtitles", action: #selector(toggle), keyEquivalent: "s")
         run.target = self
         run.tag = Tag.run
-        // The panel has no close button any more -- the standard window buttons
-        // would float over the header -- so this item is the only way to put it
-        // away, and it has to say which way it goes.
-        let panelItem = menu.addItem(withTitle: "Hide Panel", action: #selector(togglePanel), keyEquivalent: "p")
-        panelItem.target = self
-        panelItem.tag = Tag.panel
         menu.addItem(.separator())
         menu.addItem(withTitle: "Copy Transcript", action: #selector(copyTranscript), keyEquivalent: "c").target = self
         menu.addItem(withTitle: "Clear", action: #selector(clear), keyEquivalent: "").target = self
@@ -164,21 +169,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func refreshMenuTitle() {
         let menu = statusItem?.menu
         menu?.item(withTag: Tag.run)?.title = store.isRunning ? "Stop Subtitles" : "Start Subtitles"
-        menu?.item(withTag: Tag.panel)?.title = (panel?.isVisible ?? false) ? "Hide Panel" : "Show Panel"
     }
 
     // MARK: - Actions
 
+    /// Only this user-facing toggle hides the panel. A failed `start()` stops
+    /// the pipeline itself, so the panel stays up with the "Failed: …" status
+    /// visible, and `rebuildController()` cycles the pipeline without it.
     @objc private func toggle() {
         guard let controller else { return }
-        if store.isRunning { controller.stop() } else { Task { await controller.start() } }
-        refreshMenuTitle()
-    }
-
-    @objc private func togglePanel() {
-        guard let panel else { return }
-        if panel.isVisible { panel.orderOut(nil) } else { panel.orderFrontRegardless() }
-        refreshMenuTitle()
+        if store.isRunning {
+            controller.stop()
+            panel?.orderOut(nil)
+        } else {
+            // Shown before the awaits so "Starting…" is on screen at once.
+            panel?.orderFrontRegardless()
+            Task { await controller.start() }
+        }
     }
 
     @objc private func selectProvider(_ sender: NSMenuItem) {
