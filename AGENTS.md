@@ -1,1 +1,1 @@
-- Always update @docs/archiecture.md if there are any changes affect the archiecture of this program
+- Always update @docs/architecture.md if there are any changes affect the architecture of this program
