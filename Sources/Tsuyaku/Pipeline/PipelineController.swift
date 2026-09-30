@@ -25,6 +25,10 @@ final class PipelineController {
 
     /// Recent (source, translated) pairs handed to the translator as context.
     private var history: [(source: String, target: String)] = []
+    /// Whether the last translated row came from the on-device fallback, so
+    /// the user is told once when the backend drops out and once when it is
+    /// back -- not on every row in between.
+    private var onFallback = false
 
     init(store: SubtitleStore, settings: Settings = .load()) {
         self.store = store
@@ -34,6 +38,7 @@ final class PipelineController {
     func start() async {
         guard !store.isRunning else { return }
         store.status = "Starting…"
+        onFallback = false
 
         do {
             // Re-read at every Start rather than held in `Settings`, so an edit
@@ -173,9 +178,10 @@ final class PipelineController {
     ///     recognizers, and there are none. The model handles mixed-language
     ///     speech itself, so the setting is simply inert on this path.
     private func startAudioNative(glossary: Glossary) async throws {
-        guard let translator = settings.provider.makeAudioTranslator(glossary: glossary) else {
+        guard let omni = settings.provider.makeAudioTranslator(glossary: glossary) else {
             throw AudioNativeError.noKey(settings.provider)
         }
+        let translator = RetryingAudioTranslator(omni)
 
         // Nobody negotiates a format on this path, so the tap is pinned to what
         // the encoder and the model both want.
@@ -220,9 +226,9 @@ final class PipelineController {
                 case .text(let t):
                     accumulated += t
                     store.append(utterance: utterance.id, delta: t)
-                case .failed(let message):
+                case .failed(let message, _):
                     store.fail(utterance: utterance.id, message: "translation failed: \(message)")
-                case .done:
+                case .usingFallback, .done:
                     break
                 }
             }
@@ -364,8 +370,13 @@ final class PipelineController {
         }
     }
 
+    /// The provider's translator, backed by on-device NMT for the lines it
+    /// cannot translate. Not when it already is on-device NMT -- chosen, or
+    /// degraded to because a key is missing -- which has nothing to fall back to.
     private func makeTranslator(glossary: Glossary) -> any Translator {
-        settings.provider.makeTranslator(glossary: glossary)
+        let primary = settings.provider.makeTranslator(glossary: glossary)
+        if primary is AppleTranslator { return primary }
+        return FallbackTranslator(primary: primary, fallback: AppleTranslator())
     }
 
     /// Single-language mode: every event belongs to `language`.
@@ -408,16 +419,29 @@ final class PipelineController {
             }
 
             var accumulated = ""
+            var servedByFallback = false
             for await delta in translator.translate(source, context: history) {
                 switch delta {
                 case .text(let t):
                     accumulated += t
                     store.append(utterance: id, delta: t)
-                case .failed(let message):
+                case .failed(let message, _):
                     store.fail(utterance: id, message: "translation failed: \(message)")
+                case .usingFallback(let reason):
+                    servedByFallback = true
+                    if !onFallback {
+                        onFallback = true
+                        log.error("translating on-device: \(reason, privacy: .public)")
+                        store.flashNotice("\(settings.provider.shortName) unavailable — translating on-device")
+                    }
                 case .done:
                     break
                 }
+            }
+            if onFallback && !servedByFallback && !accumulated.isEmpty {
+                onFallback = false
+                log.info("\(self.settings.provider.rawValue, privacy: .public) is back")
+                store.flashNotice("\(settings.provider.shortName) is back")
             }
             // Terminal for this row: it can now graduate to the history
             // pane, unless the gate still means to revise it.

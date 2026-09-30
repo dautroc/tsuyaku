@@ -107,7 +107,8 @@ struct MessagesAPITranslator: Translator {
                     // no-op: caller went away
                 } catch {
                     Self.log.error("translate failed: \(error.localizedDescription)")
-                    continuation.yield(.failed(error.localizedDescription))
+                    continuation.yield(.failed(error.localizedDescription,
+                                               transient: TranslateError.isTransient(error)))
                 }
                 continuation.finish()
             }
@@ -144,7 +145,11 @@ struct MessagesAPITranslator: Translator {
         request.setValue("application/json", forHTTPHeaderField: "content-type")
         if let sessionID { request.setValue(sessionID, forHTTPHeaderField: "x-opencode-session") }
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
-        request.timeoutInterval = 30
+        // The idle gap between bytes, not the whole response, so a long reply
+        // streams through untouched. A server that has gone quiet for longer
+        // than this has a subtitle frozen on screen; better to hand the line
+        // to the fallback.
+        request.timeoutInterval = 10
 
         let (bytes, response) = try await URLSession.shared.bytes(for: request)
         guard let http = response as? HTTPURLResponse else {
@@ -174,8 +179,11 @@ struct MessagesAPITranslator: Translator {
                     emit(.text(t))
                 }
             case "error":
-                let msg = (obj["error"] as? [String: Any])?["message"] as? String ?? "unknown"
-                throw TranslateError.api(msg)
+                // Can arrive before any text: an overloaded server answers 200
+                // and then says so in the stream.
+                let error = obj["error"] as? [String: Any]
+                throw TranslateError.api(error?["message"] as? String ?? "unknown",
+                                         type: error?["type"] as? String)
             default:
                 continue
             }
@@ -185,15 +193,28 @@ struct MessagesAPITranslator: Translator {
 
     enum TranslateError: Error, LocalizedError {
         case http(Int, String)
-        case api(String)
+        /// - Parameter type: the stream's `error.type`, e.g. `overloaded_error`.
+        case api(String, type: String?)
         case transport(String)
         var errorDescription: String? {
             switch self {
-            case .http(let code, let body):
-                // 429 and 5xx are retryable; the caller keeps the source line visible.
-                "HTTP \(code): \(body.prefix(200))"
-            case .api(let m):       "API error: \(m)"
-            case .transport(let m): "transport: \(m)"
+            case .http(let code, let body): "HTTP \(code): \(body.prefix(200))"
+            case .api(let m, _):            "API error: \(m)"
+            case .transport(let m):         "transport: \(m)"
+            }
+        }
+
+        /// Whether `FallbackTranslator` should send the line again.
+        static func isTransient(_ error: Error) -> Bool {
+            switch error as? TranslateError {
+            case .http(let code, _)?:
+                TransientFailure.isTransient(status: code)
+            case .api(_, let type)?:
+                ["overloaded_error", "rate_limit_error", "api_error"].contains(type ?? "")
+            case .transport?:
+                true
+            case nil:
+                TransientFailure.isTransient(error)
             }
         }
     }

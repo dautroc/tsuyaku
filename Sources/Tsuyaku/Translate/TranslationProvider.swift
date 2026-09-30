@@ -24,6 +24,20 @@ enum TranslationProvider: String, CaseIterable, Sendable, Codable {
         }
     }
 
+    /// For the panel header, which has room for a word or two, not a model ID.
+    var shortName: String {
+        switch self {
+        case .apple:      "Apple NMT"
+        case .foundation: "Apple LLM"
+        case .ollama:     "Ollama"
+        case .anthropic:  "Claude"
+        case .deepseek:   "DeepSeek"
+        case .opencodeGo: "OpenCode Go"
+        case .qwenOmni:   "Qwen Omni"
+        case .geminiLive: "Gemini"
+        }
+    }
+
     /// Keychain account holding this provider's key, or nil if it needs none.
     var keychainAccount: String? {
         switch self {

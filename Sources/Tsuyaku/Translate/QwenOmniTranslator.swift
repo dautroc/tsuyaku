@@ -99,7 +99,8 @@ struct QwenOmniTranslator: AudioTranslator {
                     // no-op: caller went away
                 } catch {
                     Self.log.error("translate failed: \(error.localizedDescription)")
-                    continuation.yield(.failed(error.localizedDescription))
+                    continuation.yield(.failed(error.localizedDescription,
+                                               transient: OmniError.isTransient(error)))
                     continuation.yield(.done)
                 }
                 continuation.finish()
@@ -199,6 +200,16 @@ struct QwenOmniTranslator: AudioTranslator {
             case .http(let code, let body): "HTTP \(code): \(body.prefix(300))"
             case .api(let m):               "Model Studio error: \(m)"
             case .transport(let m):         "transport: \(m)"
+            }
+        }
+
+        /// Whether `RetryingAudioTranslator` should send the utterance again.
+        static func isTransient(_ error: Error) -> Bool {
+            switch error as? OmniError {
+            case .http(let code, _)?: TransientFailure.isTransient(status: code)
+            case .api?:               false
+            case .transport?:         true
+            case nil:                 TransientFailure.isTransient(error)
             }
         }
     }

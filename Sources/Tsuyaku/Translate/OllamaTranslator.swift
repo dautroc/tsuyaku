@@ -123,7 +123,8 @@ struct OllamaTranslator: Translator {
                     // no-op: caller went away
                 } catch {
                     Self.log.error("translate failed: \(error.localizedDescription)")
-                    continuation.yield(.failed(error.localizedDescription))
+                    continuation.yield(.failed(error.localizedDescription,
+                                               transient: TranslateError.isTransient(error)))
                     continuation.yield(.done)
                 }
                 continuation.finish()
@@ -208,6 +209,18 @@ struct OllamaTranslator: Translator {
             case .http(let code, let body): "HTTP \(code): \(body.prefix(200))"
             case .api(let m):               "Ollama error: \(m)"
             case .transport(let m):         "transport: \(m)"
+            }
+        }
+
+        /// Whether `FallbackTranslator` should send the line again. A server
+        /// that is not running refuses the connection, which counts: Ollama
+        /// restarting is exactly the case a retry covers.
+        static func isTransient(_ error: Error) -> Bool {
+            switch error as? TranslateError {
+            case .http(let code, _)?: TransientFailure.isTransient(status: code)
+            case .api?:               false
+            case .transport?:         true
+            case nil:                 TransientFailure.isTransient(error)
             }
         }
     }

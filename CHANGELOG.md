@@ -10,6 +10,7 @@ patch version moves for fixes and packaging. Nothing here is API-stable.
 
 Three things that were half-built, now reachable from the menu bar: the
 glossary, a per-app capture source, and transcripts that outlast the panel.
+And a failed translation no longer costs the sentence.
 
 ### Added
 
@@ -39,12 +40,27 @@ whatever is still in the live pane is written too, so the last thing said is
 not lost. On by default; **Save Transcripts** turns it off and **Open
 Transcripts Folder** shows the files.
 
+**Retry and on-device fallback.** A rate limit, an overloaded server or a
+dropped connection used to leave an orange `translation failed` row where the
+sentence should have been. A text backend's failed line is now retried twice
+(after 0.4 s and 1.2 s) if it failed fast, and otherwise translated by on-device
+Apple NMT. The header says so once ("Claude unavailable — translating
+on-device") and again when the backend is back. During an outage, lines go
+straight to NMT for 30 s at a time instead of each paying for three failed
+attempts. A failure that retrying cannot fix, like a bad key or an on-device LLM
+refusal, falls back for that line only. Qwen Omni gets the retries but no
+fallback, since it has no source text to hand over.
+
 ### Changed
 
 - The glossary is no longer a `UserDefaults` key. Nothing ever wrote that key,
   so no saved glossary is lost.
 - Copy Transcript no longer puts an empty `>` quote above Qwen Omni rows, which
   have no source text. The copied and saved transcripts share one format.
+- Claude, DeepSeek and OpenCode Go requests time out after 10 s of silence
+  instead of 30 s, so a hung connection reaches the fallback while the line is
+  still current. A streaming reply is unaffected: the limit is the gap between
+  bytes.
 
 ## [0.3.0] - 2026-09-30
 

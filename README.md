@@ -48,6 +48,7 @@ make test
 | Gemini Live Translate | Optional `geminiLive` backend: streams meeting audio to `gemini-3.5-live-translate-preview`, which transcribes and translates it in the cloud with no on-device recognizer. |
 | Glossary | **Edit Glossary…** opens `glossary.txt`, one `ラクスル = Raksul` per line. Terms help recognition hear names and keep translations consistent. Changes apply at the next Start. |
 | Capture From | Subtitle one app (Zoom, Teams, a browser) instead of everything the Mac plays. The menu lists the apps currently playing audio. |
+| Failure fallback | A rate limit or outage no longer loses the line: it is retried, then translated on-device with a one-time notice in the header. |
 | Saved transcripts | Each session is saved as Markdown in `~/Library/Application Support/Tsuyaku/Transcripts` as its lines settle, beyond the panel's 500-line history. **Save Transcripts** turns this off; **Open Transcripts Folder** shows them. |
 | Settings persistence | Provider choice and API keys in the keychain survive relaunches. |
 

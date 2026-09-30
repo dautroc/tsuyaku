@@ -116,8 +116,8 @@ enum CLI {
             case .text(let s):
                 if first == nil { first = clock.now - begin }
                 out += s
-            case .failed(let e): out = "[failed: \(e)]"
-            case .done: break
+            case .failed(let e, _): out = "[failed: \(e)]"
+            case .usingFallback, .done: break
             }
         }
         return (out, first ?? .zero)
@@ -315,7 +315,7 @@ enum CLI {
         }
 
         if CommandLine.arguments.contains("--store-selftest") {
-            await MainActor.run { StoreSelfTest.run() }
+            await StoreSelfTest.run()
             exit(0)
         }
 
@@ -408,8 +408,8 @@ enum CLI {
             for await delta in t.translate(audio: audio, context: []) {
                 switch delta {
                 case .text(let x):   out += x
-                case .failed(let m): failure = m
-                case .done:          break
+                case .failed(let m, _):     failure = m
+                case .usingFallback, .done: break
                 }
             }
             if let failure { print("FAILED: \(failure)"); exit(1) }
@@ -609,7 +609,7 @@ enum CLI {
                         var out = ""; var first: Duration?
                         for await d in translator.translate(source, context: history.suffix(4).map { $0 }) {
                             if case .text(let t) = d { if first == nil { first = clock.now - begin }; out += t }
-                            if case .failed(let e) = d { out = "[translation failed: \(e)]" }
+                            if case .failed(let e, _) = d { out = "[translation failed: \(e)]" }
                         }
                         print("\u{1B}[1mJA\u{1B}[0m \(source)")
                         print("\u{1B}[1;32mEN\u{1B}[0m \(out)\(provisional ? "  (provisional)" : "")  [ttfb \(first?.description ?? "n/a")]")

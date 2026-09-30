@@ -49,6 +49,7 @@ flowchart TB
     end
 
     subgraph TextTranslate["Text translation backends"]
+        Fallback["FallbackTranslator<br/>retry + on-device fallback"]
         TextProvider["TranslationProvider"]
         Apple["AppleTranslator<br/>on-device NMT"]
         Foundation["FoundationModelTranslator<br/>Apple Intelligence"]
@@ -57,6 +58,7 @@ flowchart TB
     end
 
     subgraph AudioTranslate["Audio-native translation"]
+        RetryAudio["RetryingAudioTranslator"]
         Omni["QwenOmniTranslator<br/>speech → English"]
         Gemini["GeminiLiveTranslator<br/>streaming speech → English"]
     end
@@ -87,20 +89,20 @@ flowchart TB
     JaGate -->|Event| Picker
     EnGate -->|Event| Picker
 
-    Picker -->|DecidedEvent| TextProvider
+    Picker -->|DecidedEvent| Fallback
+    Fallback -->|primary| TextProvider
     TextProvider --> Apple
     TextProvider --> Foundation
     TextProvider --> Ollama
     TextProvider --> Messages
+    Fallback -.->|line the primary failed| Apple
 
-    Apple -->|TranslationDelta| Store
-    Foundation -->|TranslationDelta| Store
-    Ollama -->|TranslationDelta| Store
-    Messages -->|TranslationDelta| Store
+    Fallback -->|TranslationDelta| Store
 
     Converter -->|AudioChunk| Segmenter
-    Segmenter -->|Utterance WAV| Omni
-    Omni -->|TranslationDelta| Store
+    Segmenter -->|Utterance WAV| RetryAudio
+    RetryAudio -->|retried on 429 / 5xx| Omni
+    RetryAudio -->|TranslationDelta| Store
 
     Converter -->|AudioChunk| Gemini
     Gemini -->|LiveDelta| Rows
@@ -125,6 +127,8 @@ flowchart TB
 
 - Text providers (`apple`, `foundation`, `ollama`, `anthropic`, `deepseek`, `opencodeGo`) build an `AppleTranscriber`-based graph.
 - The audio-native providers bypass speech recognition. `qwenOmni` builds a `VoiceSegmenter`-based graph; `geminiLive` streams the audio into one live session with no segmenter at all.
+
+On the text path, the provider's translator is wrapped in a `FallbackTranslator`, with `AppleTranslator` as the fallback. There is no wrapper when the provider's translator already is `AppleTranslator`. Qwen Omni is wrapped in a `RetryingAudioTranslator`, which retries but has no fallback. See [Failure handling](#failure-handling).
 
 Every path ends in `SubtitleStore`, and every row leaves the live pane through one method, `graduate()`. That is where `onSettled` hands the row to `TranscriptWriter`, so the saved transcript covers all backends and is unaffected by the panel's 500-row cap.
 
@@ -161,8 +165,8 @@ sequenceDiagram
             else
                 PC->>T: translate(source, context: history)
                 loop streaming deltas
-                    T->>PC: .text(delta) / .failed(msg) / .done
-                    PC->>Store: append / fail
+                    T->>PC: .text(delta) / .usingFallback(reason) / .failed(msg) / .done
+                    PC->>Store: append / flashNotice / fail
                 end
                 PC->>Store: finishLine(utterance: id)
                 opt non-empty target
@@ -329,6 +333,7 @@ classDiagram
         -consume(utterances, using audioTranslator)
         -consume(deltas)
         -tickLive()
+        -Bool onFallback
     }
 
     class SubtitleStore {
@@ -434,6 +439,34 @@ classDiagram
         +translate(text, context) AsyncStream~TranslationDelta~
     }
 
+    class TranslationDelta {
+        <<enum>>
+        text(String)
+        done
+        failed(String, transient)
+        usingFallback(String)
+    }
+
+    class RetryPolicy {
+        +[Duration] delays
+        +Duration budget
+        +run(attempt, emit) Outcome
+    }
+
+    class FallbackTranslator {
+        +Translator primary
+        +Translator fallback
+        +RetryPolicy policy
+        +Duration cooldown
+        +translate(text, context)
+    }
+
+    class RetryingAudioTranslator {
+        +AudioTranslator inner
+        +RetryPolicy policy
+        +translate(audio, context)
+    }
+
     class AudioTranslator {
         <<protocol>>
         +translate(audio: Data, context: [String]) AsyncStream~TranslationDelta~
@@ -501,6 +534,7 @@ classDiagram
         opencodeGo
         qwenOmni
         geminiLive
+        +String shortName
         +String? keychainAccount
         +Bool needsKey
         +Bool hasKey
@@ -546,6 +580,13 @@ classDiagram
     SegmentGate --> LanguagePicker
     LanguagePicker --> Translator
     Translator --> SubtitleStore
+    Translator ..> TranslationDelta
+    Translator <|.. FallbackTranslator
+    FallbackTranslator --> Translator : primary, fallback
+    FallbackTranslator --> RetryPolicy
+    AudioTranslator <|.. RetryingAudioTranslator
+    RetryingAudioTranslator --> AudioTranslator : inner
+    RetryingAudioTranslator --> RetryPolicy
     AudioTranslator --> SubtitleStore
     LiveTranslator <|.. GeminiLiveTranslator
     LiveRowSegmenter --> SubtitleStore
@@ -620,6 +661,39 @@ flowchart TB
 ```
 
 `TranslationProvider.isUsable` checks more than key presence: it probes Ollama reachability and Apple Intelligence availability so unavailable backends are greyed out in the menu instead of silently degrading.
+
+### Failure handling
+
+Backends report each failure with `.failed(message, transient:)`. A failure is `transient` when sending the same request again has a fair chance of working:
+
+- HTTP 408, 429, 500, 502, 503, 504 or 529.
+- An SSE `overloaded_error`, `rate_limit_error` or `api_error`.
+- A dropped, refused or timed-out connection (`TransientFailure`).
+
+`FallbackTranslator` sits between the pipeline and the text backend and handles each line in three steps:
+
+```mermaid
+flowchart TB
+    Line["line to translate"] --> Open{"circuit open?"}
+    Open -->|yes| NMT["AppleTranslator"]
+    Open -->|no| Primary["primary backend"]
+    Primary -->|text, no failure| Done["row"]
+    Primary -->|failed after text| Fail["failed row"]
+    Primary -->|transient, early, within 3 s| Retry["wait 0.4 s / 1.2 s, retry"]
+    Retry --> Primary
+    Primary -->|otherwise failed before text| NMT
+    NMT -->|text| Notice[".usingFallback, then text<br/>transient: open circuit 30 s"]
+    NMT -->|failed too| PrimaryError["primary's error"]
+    Notice --> Done
+```
+
+1. **Retry.** A retry happens only before any text has streamed, so a line is never translated twice. It also happens only while the line is less than 3 s old (`RetryPolicy.budget`): a 429 that fails in 200 ms is retried, but a 10 s timeout is not.
+2. **Fall back.** If the primary still fails before any text, the line goes to on-device NMT. `.usingFallback(reason)` comes before the fallback's text. `PipelineController` turns it into a single header notice ("Claude unavailable — translating on-device"), then "Claude is back" when a row next comes from the primary. If the fallback fails too, the row shows the primary's error.
+3. **Circuit.** A transient failure that the fallback covered opens a circuit for 30 s. During that time, lines go straight to NMT and pay no retries. After it, one line probes the primary with no retries. The circuit opens only when the fallback worked, so a Mac without the Japanese NMT model keeps trying the primary.
+
+Non-transient failures (a bad key, an on-device LLM refusal, an empty reply) fall back for that line only.
+
+Qwen Omni gets the same retries through `RetryingAudioTranslator` but has no fallback: nothing transcribes its audio, so there is no text to give NMT. Gemini Live reconnects on its own (§5).
 
 ---
 
