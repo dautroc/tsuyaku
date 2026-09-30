@@ -17,7 +17,7 @@ enum CLI {
       --version                   print the version and exit
       --probe                     report framework/model/asset status
       --install-assets            download the on-device speech model (see --locale)
-      --apple-preflight           check the Apple ja->en translation model
+      --apple-preflight           check the Apple ja->en and en->ja translation models
       --set-key <provider> <key>  store a key (provider: anthropic | deepseek | opencodeGo | qwenOmni | geminiLive)
       --provider <name>           apple | foundation | ollama | anthropic | deepseek | opencodeGo | qwenOmni | geminiLive (default: saved setting)
       --opencode-model <id>       OpenCode Go model ID (default: deepseek-v4.1-flash)
@@ -34,6 +34,7 @@ enum CLI {
       --listen-dual-file <path.wav>   the same, replayed from a --capture recording
       --translate-text <ja>       one-shot translation, reports TTFB
       --pipeline [bundle|global] [s]  full pipeline to stdout, with the glossary applied
+      --listen-mic [s]            your microphone, English to Japanese, as Translate My Voice hears it
       --store-selftest            check the subtitle pane logic (no audio, no network)
       --device-switch-test        switch the output device mid-capture and verify recovery
 
@@ -336,6 +337,11 @@ enum CLI {
         if CommandLine.arguments.contains("--apple-preflight") {
             print("=== Apple Translation preflight (ja -> en) ===")
             print(await AppleTranslator.preflight())
+            // The fallback, or the backend, for Translate My Voice.
+            let reverse = TranslationDirection.englishToJapanese
+            print("=== Apple Translation preflight (en -> ja) ===")
+            print(await AppleTranslator.preflight(source: reverse.sourceLanguage,
+                                                  target: reverse.targetLanguage))
             exit(0)
         }
 
@@ -567,6 +573,64 @@ enum CLI {
             for (provider, (total, count)) in totals where count > 0 {
                 print("   \(pad(provider.rawValue))  \(total / count)")
             }
+            exit(0)
+        }
+
+        // Translate My Voice, headless: is the user's English recognized well
+        // enough, and does the Japanese read naturally? Worth a minute before
+        // trusting the caption panel in front of colleagues.
+        if let i = CommandLine.arguments.firstIndex(of: "--listen-mic") {
+            let seconds = CommandLine.arguments.count > i+1 ? Double(CommandLine.arguments[i+1]) ?? 30 : 30
+            guard await MicrophoneCapture.authorize() else {
+                print("microphone access denied -- allow it in System Settings > Privacy & Security > Microphone")
+                exit(1)
+            }
+            let glossary = Glossary.loadUser()
+            let chosen = selectedProvider() ?? Settings.load().provider
+            let provider = TranslationProvider.voiceProvider(
+                preferring: chosen, usable: Set(TranslationProvider.allCases.filter(\.isUsable)))
+            let translator = provider.makeTranslator(glossary: glossary.reversed, direction: .englishToJapanese)
+            print("translator: \(provider.displayName)\(provider == chosen ? "" : " (\(chosen.rawValue) cannot take text)")")
+            let stt  = try await AppleTranscriber(locale: Locale(identifier: "en-US"),
+                                                  contextualStrings: glossary.targetTerms)
+            let mic  = MicrophoneCapture(outputFormat: stt.inputFormat)
+            let gate = SegmentGate(config: .english)
+
+            try await stt.start()
+            try mic.start()
+            print("listening to the microphone for \(seconds)s -- speak as you would in a meeting")
+
+            let pump  = Task { for await c in mic.buffers { await stt.feed(c) } }
+            let feed  = Task { for await s in stt.segments { await gate.ingest(s) } }
+            let timer = Task { while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(500)); await gate.tick() } }
+            let hearing = Task {
+                for await s in gate.hearing where !s.isEmpty {
+                    print("  \u{1B}[90m... \(s)\u{1B}[0m")
+                }
+            }
+            let driver = Task {
+                var history: [(source: String, target: String)] = []
+                for await ev in gate.events {
+                    guard case .translate(_, let source, let provisional) = ev else { continue }
+                    let clock = ContinuousClock(); let begin = clock.now
+                    var out = ""; var first: Duration?
+                    for await d in translator.translate(source, context: history.suffix(4).map { $0 }) {
+                        if case .text(let t) = d { if first == nil { first = clock.now - begin }; out += t }
+                        if case .failed(let e, _) = d { out = "[translation failed: \(e)]" }
+                    }
+                    print("\u{1B}[1mEN\u{1B}[0m \(source)")
+                    print("\u{1B}[1;32mJA\u{1B}[0m \(out)\(provisional ? "  (provisional)" : "")  [ttfb \(first?.description ?? "n/a")]")
+                    history.append((source, out))
+                }
+            }
+
+            try? await Task.sleep(for: .seconds(seconds))
+            mic.stop(); pump.cancel(); timer.cancel()
+            await stt.finish()
+            try? await Task.sleep(for: .seconds(2))
+            feed.cancel(); driver.cancel(); hearing.cancel()
+            print("--- microphone test complete ---")
             exit(0)
         }
 

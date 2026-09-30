@@ -32,6 +32,10 @@ struct Settings: Sendable {
     /// the panel's history is capped, and a meeting is not something to get
     /// back once it is over.
     var saveTranscripts: Bool = true
+    /// Also caption the user's own English in Japanese, from the microphone,
+    /// in a second panel for screen sharing. Off by default: it needs the
+    /// microphone, and headphones to keep colleagues' audio out of it.
+    var translateMyVoice: Bool = false
 
     private enum Key {
         static let sourceLocale = "sourceLocale"
@@ -45,6 +49,7 @@ struct Settings: Sendable {
         static let contextTurns = "contextTurns"
         static let provider = "translationProvider"
         static let saveTranscripts = "saveTranscripts"
+        static let translateMyVoice = "translateMyVoice"
         static let omniModel = "omniModel"
         static let opencodeModel = "opencodeModel"
         static let geminiModel = "geminiModel"
@@ -108,6 +113,7 @@ struct Settings: Sendable {
         if d.object(forKey: Key.saveTranscripts) != nil {
             s.saveTranscripts = d.bool(forKey: Key.saveTranscripts)
         }
+        s.translateMyVoice = d.bool(forKey: Key.translateMyVoice)
         return s
     }
 
@@ -124,5 +130,6 @@ struct Settings: Sendable {
         d.set(contextTurns, forKey: Key.contextTurns)
         d.set(provider.rawValue, forKey: Key.provider)
         d.set(saveTranscripts, forKey: Key.saveTranscripts)
+        d.set(translateMyVoice, forKey: Key.translateMyVoice)
     }
 }

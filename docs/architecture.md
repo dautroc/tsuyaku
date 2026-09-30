@@ -4,6 +4,8 @@ Tsuyaku is a macOS menu-bar app that captures another application's audio output
 
 A second backend family skips on-device transcription entirely and translates straight from audio to English text: **Qwen Omni**, one request per utterance, and **Gemini Live Translate**, one streaming session for the whole meeting.
 
+**Translate My Voice** runs the other way at the same time. It takes the user's own English from the microphone, translates it into Japanese, and shows it in a second caption panel that colleagues read on the shared screen (§11).
+
 ---
 
 ## Table of contents
@@ -18,6 +20,7 @@ A second backend family skips on-device transcription entirely and translates st
 8. [Audio capture and recovery](#8-audio-capture-and-recovery)
 9. [Configuration and secrets](#9-configuration-and-secrets)
 10. [CLI diagnostics](#10-cli-diagnostics)
+11. [Translate My Voice (microphone → Japanese captions)](#11-translate-my-voice-microphone--japanese-captions)
 
 ---
 
@@ -27,11 +30,21 @@ A second backend family skips on-device transcription entirely and translates st
 flowchart TB
     subgraph Input["Audio input"]
         App["Meeting / media app"]
+        Voice(("Your voice"))
     end
 
     subgraph Capture["Capture"]
         Tap["SystemAudioTap<br/>Core Audio process tap"]
         Converter["FormatConverter"]
+        Mic["MicrophoneCapture<br/>AVAudioEngine input"]
+    end
+
+    subgraph MyVoice["Translate My Voice (VoicePipeline)"]
+        MyVoiceSTT["AppleTranscriber<br/>en-US"]
+        MyVoiceGate["SegmentGate<br/>English"]
+        MyVoiceTranslator["FallbackTranslator<br/>English → Japanese"]
+        CaptionStore["SubtitleStore<br/>captions"]
+        CaptionPanel["CaptionView in FloatingPanel<br/>on the shared screen"]
     end
 
     subgraph STT["On-device speech recognition<br/>(text backends)"]
@@ -109,6 +122,14 @@ flowchart TB
     Converter -->|AudioChunk| Gemini
     Gemini -->|LiveDelta| Rows
     Rows -->|row ops| Store
+
+    Voice -->|microphone| Mic
+    Mic -->|AudioChunk| MyVoiceSTT
+    MyVoiceSTT -->|Segment| MyVoiceGate
+    MyVoiceGate -->|Event| MyVoiceTranslator
+    MyVoiceTranslator -->|TranslationDelta| CaptionStore
+    CaptionStore --> CaptionPanel
+    CaptionPanel -->|screen share| Colleagues[(Colleagues)]
 
     Store --> View
     Style --> View
@@ -291,6 +312,9 @@ classDiagram
         +NSMenu? captureMenu
         +PanelStyle style
         +GlobalHotKey? hotKey
+        +SubtitleStore captionStore
+        +FloatingPanel captionPanel
+        +VoicePipeline? voice
         +applicationDidFinishLaunching()
         +toggle()
         +buildMenu()
@@ -304,6 +328,7 @@ classDiagram
         +selectTextSize(item)
         +toggleShowJapanese(item)
         +toggleClickThrough(item)
+        +toggleTranslateMyVoice(item)
         +installModel()
         +copyTranscript()
         +clear()
@@ -374,6 +399,8 @@ classDiagram
 
     class FloatingPanel {
         +init(store, style)
+        +init(content, layout, clickThrough)
+        +Layout layout
         +Bool ignoresMouseEvents
         +orderFrontRegardless()
         +recoverIfOffScreen()
@@ -383,6 +410,32 @@ classDiagram
     class SubtitleView {
         +ObservedObject store
         +ObservedObject style
+    }
+
+    class VoicePipeline {
+        +SubtitleStore captions
+        +TranslationProvider provider
+        +start(glossary) async String?
+        +stop()
+    }
+
+    class MicrophoneCapture {
+        +AsyncStream~AudioChunk~ buffers
+        +authorize() async Bool
+        +start()
+        +stop()
+    }
+
+    class CaptionView {
+        +ObservedObject store
+    }
+
+    class TranslationDirection {
+        <<enum>>
+        japaneseToEnglish
+        englishToJapanese
+        +String sourceName
+        +String targetName
     }
 
     class PanelStyle {
@@ -589,6 +642,15 @@ classDiagram
     AppDelegate --> TranslationDownloadHost
     AppDelegate --> TranscriptWriter
     AppDelegate --> PanelStyle
+    AppDelegate --> VoicePipeline
+    VoicePipeline --> MicrophoneCapture
+    VoicePipeline --> AppleTranscriber
+    VoicePipeline --> SegmentGate
+    VoicePipeline --> Translator
+    VoicePipeline --> SubtitleStore
+    CaptionView --> SubtitleStore
+    CaptionView --> FloatingPanel
+    Translator ..> TranslationDirection
     AppDelegate --> GlobalHotKey
     PanelStyle <.. SubtitleView
     PanelStyle <.. FloatingPanel
@@ -693,6 +755,8 @@ flowchart TB
 
 `TranslationProvider.isUsable` checks more than key presence: it probes Ollama reachability and Apple Intelligence availability so unavailable backends are greyed out in the menu instead of silently degrading.
 
+Every text backend takes a `TranslationDirection`, which defaults to Japanese → English. `InterpreterPrompt` keeps one set of style rules per direction. The Japanese → English prompt is byte-identical to the one before directions existed, and a self-test holds it there. Translate My Voice asks for English → Japanese with the glossary reversed (`Glossary.reversed`). Qwen Omni and Gemini Live only produce English, so when either is selected, `TranslationProvider.voiceProvider` picks the first usable keyed text backend for the captions, or Apple NMT.
+
 ### Failure handling
 
 Backends report each failure with `.failed(message, transient:)`. A failure is `transient` when sending the same request again has a fair chance of working:
@@ -732,6 +796,10 @@ Qwen Omni gets the same retries through `RetryingAudioTranslator` but has no fal
 
 `SystemAudioTap` builds a Core Audio process tap and aggregate device, converts the audio to the downstream format, and survives output-device changes (for example, Bluetooth headphones disconnecting).
 
+The aggregate device needs a real output device as its clock. It uses the Mac's built-in output (`CA.builtInOutputDevice`), and falls back to the default output only on a Mac that has none. The tap captures apps' audio before it reaches any device, so the clock doesn't have to be what the user is listening on.
+
+A Bluetooth headset is a poor clock. When any app opens its microphone, for example a Meet call or Translate My Voice, the headset switches to the hands-free profile and changes rate and shape. Built on HUAWEI FreeClip 2 with its microphone open, the IOProc stopped firing for good, and the watchdog rebuilt the graph every four seconds without ever getting audio back.
+
 ```mermaid
 flowchart TB
     subgraph CoreAudio["Core Audio HAL"]
@@ -757,6 +825,8 @@ flowchart TB
     RecoveryEvent --> AppDelegate["AppDelegate.handleRecovery"]
     Failure --> AppDelegate
 ```
+
+The user's own voice doesn't come through the tap: a meeting app never plays it back. `MicrophoneCapture` reads it from the default input device with `AVAudioEngine` and passes it through the same `FormatConverter`. When the default input changes, for example when a headset is plugged in, the engine posts `AVAudioEngineConfigurationChange`; the capture then rebuilds the converter for the new format and restarts. There is no voice processing, because its echo cancellation would also duck the meeting audio the tap is capturing. Headphones are the answer to echo.
 
 The tap can target a single bundle ID or all system audio except the app itself (`bundleIDs == []`). The user chooses from the **Capture From** menu. It is refilled from `CA.runningOutputBundleIDs()` each time it opens and always lists the saved choice, even when that app is quiet or not running. `isProcessRestoreEnabled` reattaches the tap when that app relaunches. Changing the choice mid-meeting cycles the pipeline through `rebuildController()`. The `buffers` stream survives rebuilds; only `stop()` finishes it.
 
@@ -788,6 +858,7 @@ flowchart LR
         Latency["maxLatencySeconds"]
         Context["contextTurns"]
         SaveTranscripts["saveTranscripts"]
+        TranslateMyVoice["translateMyVoice"]
         OmniModel["omniModel"]
         OpenCodeModel["opencodeModel"]
         GeminiModel["geminiModel"]
@@ -846,6 +917,7 @@ flowchart LR
     CLI --> ListenDual["--listen-dual"]
     CLI --> ListenDualFile["--listen-dual-file"]
     CLI --> Pipeline["--pipeline"]
+    CLI --> ListenMic["--listen-mic"]
     CLI --> StoreSelfTest["--store-selftest"]
     CLI --> DeviceSwitchTest["--device-switch-test"]
     CLI --> TranslateText["--translate-text"]
@@ -866,4 +938,39 @@ flowchart LR
     GlossaryFlag --> GlossaryParse["Glossary.loadUser"]
     Pipeline --> GlossaryParse
     GeminiTest --> GeminiLiveTranslator["GeminiLiveTranslator"]
+    ListenMic --> MicrophoneCapture["MicrophoneCapture"]
+    ListenMic --> AppleTranscriber
 ```
+
+`--apple-preflight` checks both on-device directions: Japanese → English for the subtitles, and English → Japanese for Translate My Voice's fallback. `--listen-mic [s]` runs Translate My Voice without the panel. It prints each recognized English sentence and its Japanese translation, which is the quickest way to judge how well the recognizer hears a particular speaker.
+
+---
+
+## 11. Translate My Voice (microphone → Japanese captions)
+
+For a user who speaks English to Japanese colleagues. Google Meet and similar apps have no API for putting captions into the call, but everything on an "Entire screen" share reaches every participant. So the captions are a window on the shared screen.
+
+```mermaid
+sequenceDiagram
+    participant U as You
+    participant Mic as MicrophoneCapture
+    participant STT as AppleTranscriber (en-US)
+    participant Gate as SegmentGate (English)
+    participant T as FallbackTranslator (en → ja)
+    participant C as Caption SubtitleStore
+    participant P as Caption panel (shared screen)
+
+    U->>Mic: speech
+    Mic->>STT: AudioChunk
+    STT->>Gate: Segment
+    Gate->>C: hearing (partial English)
+    Gate->>T: Event.translate(id, English)
+    T->>C: .text(Japanese) / .failed
+    C->>P: last two rows, Japanese large, English small
+```
+
+- **Independent of the subtitles.** `VoicePipeline` shares no runtime state with `PipelineController`: it has its own audio, recognizer, gate, translator, context history and store. It starts and stops with Start/Stop and ⌃⌥⌘S when **Translate My Voice** is on. Toggling it mid-meeting leaves the subtitles running, and a provider change relaunches it without hiding the caption panel.
+- **Built for an audience.** `CaptionView` has no history and no scrolling, because nobody watching a share can scroll. It shows the last two rows (`CaptionRows.visible`). A failed row keeps its English and shows no error message; the error is logged.
+- **The user's own panel stays private.** While the captions run, the subtitle panel has `sharingType = .none`, so a full-screen share shows only the captions. Whether a given capture path honours that is up to the capturing app.
+- **Placement is remembered.** The caption panel uses `FloatingPanel.Layout.captions`, which keeps its origin across launches, unlike the subtitle panel. Where it sits inside the shared area is a deliberate choice.
+- **Headphones.** Without them the microphone also hears colleagues through the speakers, and the English recognizer turns their Japanese into nonsense captions.

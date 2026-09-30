@@ -54,28 +54,26 @@ struct QwenOmniTranslator: AudioTranslator {
     let endpoint: URL
     let model: String
     let glossary: Glossary
-    let sourceName: String
-    let targetName: String
+    /// Speech arrives as audio, so only the direction the omni model was
+    /// asked for exists; the caption panel never uses this backend.
+    let direction: TranslationDirection
 
     init(apiKey: String,
          endpoint: URL = defaultEndpoint,
          model: String = defaultModel,
          glossary: Glossary = .empty,
-         sourceName: String = "Japanese",
-         targetName: String = "English") {
+         direction: TranslationDirection = .japaneseToEnglish) {
         self.apiKey = apiKey
         self.endpoint = endpoint
         self.model = model
         self.glossary = glossary
-        self.sourceName = sourceName
-        self.targetName = targetName
+        self.direction = direction
     }
 
     /// The shared interpreter brief, with the one rule that has to differ:
     /// the line to translate arrives as audio, not as text.
     private var systemPrompt: String {
-        InterpreterPrompt.system(sourceName: sourceName,
-                                 targetName: targetName,
+        InterpreterPrompt.system(direction: direction,
                                  glossary: glossary,
                                  finalLineRule: InterpreterPrompt.audioRule)
     }

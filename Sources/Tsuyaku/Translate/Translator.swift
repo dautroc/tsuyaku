@@ -15,6 +15,44 @@ enum TranslationDelta: Sendable {
     case usingFallback(String)
 }
 
+/// Which way a translator works. Colleagues' Japanese into English for the
+/// subtitle panel, or the user's own English into Japanese for the caption
+/// panel their colleagues read on the shared screen.
+enum TranslationDirection: Sendable, Equatable {
+    case japaneseToEnglish
+    case englishToJapanese
+
+    /// As the interpreter prompt names them.
+    var sourceName: String {
+        switch self {
+        case .japaneseToEnglish: "Japanese"
+        case .englishToJapanese: "English"
+        }
+    }
+
+    var targetName: String {
+        switch self {
+        case .japaneseToEnglish: "English"
+        case .englishToJapanese: "Japanese"
+        }
+    }
+
+    /// For Apple's `Translation` framework.
+    var sourceLanguage: Locale.Language {
+        switch self {
+        case .japaneseToEnglish: .init(identifier: "ja")
+        case .englishToJapanese: .init(identifier: "en")
+        }
+    }
+
+    var targetLanguage: Locale.Language {
+        switch self {
+        case .japaneseToEnglish: .init(identifier: "en")
+        case .englishToJapanese: .init(identifier: "ja")
+        }
+    }
+}
+
 /// A backend that translates one finalized source segment.
 ///
 /// Protocol-first so the Claude backend can be swapped for Apple's on-device

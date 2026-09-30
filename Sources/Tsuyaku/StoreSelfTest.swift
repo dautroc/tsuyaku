@@ -34,6 +34,7 @@ enum StoreSelfTest {
         failures += GlossarySelfTest.run()
         failures += TranscriptSelfTest.run()
         failures += PanelStyleSelfTest.run()
+        failures += VoiceSelfTest.run()
         failures += await FallbackSelfTest.run()
         print(failures == 0 ? "\nall checks passed" : "\n\(failures) CHECK(S) FAILED")
         exit(failures == 0 ? 0 : 1)

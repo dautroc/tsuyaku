@@ -29,15 +29,12 @@ struct FoundationModelTranslator: Translator {
     static var isAvailable: Bool { model.isAvailable }
 
     let glossary: Glossary
-    let sourceName: String
-    let targetName: String
+    let direction: TranslationDirection
 
     init(glossary: Glossary = .empty,
-         sourceName: String = "Japanese",
-         targetName: String = "English") {
+         direction: TranslationDirection = .japaneseToEnglish) {
         self.glossary = glossary
-        self.sourceName = sourceName
-        self.targetName = targetName
+        self.direction = direction
     }
 
     /// Loads the model weights so the first real utterance of a meeting does
@@ -50,8 +47,7 @@ struct FoundationModelTranslator: Translator {
     /// Shared with every other LLM backend so `--compare` measures the model
     /// and not the prompt.
     private var instructions: String {
-        InterpreterPrompt.system(sourceName: sourceName,
-                                 targetName: targetName,
+        InterpreterPrompt.system(direction: direction,
                                  glossary: glossary,
                                  finalLineRule: InterpreterPrompt.labelledRule)
     }

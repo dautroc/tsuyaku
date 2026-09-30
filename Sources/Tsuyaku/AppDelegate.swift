@@ -12,6 +12,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let style = PanelStyle()
     private var statusItem: NSStatusItem?
     private var panel: FloatingPanel?
+    /// Translate My Voice: the user's English, in Japanese, for the shared
+    /// screen. Its own store and panel; the pipeline exists only while it runs.
+    private let captionStore = SubtitleStore()
+    private var captionPanel: FloatingPanel?
+    private var voice: VoicePipeline?
     private var controller: PipelineController?
     private var downloadHost: TranslationDownloadHost?
     /// Defaults until `loadSettings()` replaces them. Deliberately *not*
@@ -47,6 +52,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// session, so "Start Subtitles" shows it and "Stop Subtitles" puts it away.
     func applicationDidFinishLaunching(_ notification: Notification) {
         panel = FloatingPanel(store: store, style: style)
+        captionPanel = FloatingPanel(content: CaptionView(store: captionStore), layout: .captions)
         store.onSettled = { [weak self] rows in self?.saveSettled(rows) }
         // Before settings load `toggle()` does nothing, so this is safe to
         // arm this early.
@@ -70,7 +76,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             forName: NSApplication.didChangeScreenParametersNotification,
             object: nil, queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.panel?.recoverIfOffScreen() }
+            MainActor.assumeIsolated {
+                self?.panel?.recoverIfOffScreen()
+                self?.captionPanel?.recoverIfOffScreen()
+            }
         }
         Task { await loadSettings() }
     }
@@ -93,6 +102,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         controller?.stop()
+        voice?.stop()
         endTranscript()
     }
 
@@ -186,6 +196,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         detect.state = settings.autoDetectLanguage ? .on : .off
         detect.toolTip = "Run a second English recognizer and show English turns verbatim, untranslated."
 
+        let myVoice = menu.addItem(withTitle: "Translate My Voice",
+                                   action: #selector(toggleTranslateMyVoice(_:)), keyEquivalent: "")
+        myVoice.target = self
+        myVoice.state = settings.translateMyVoice ? .on : .off
+        myVoice.toolTip = "Show Japanese captions of what you say, in a second panel for screen sharing. Use headphones."
+
         let capture = NSMenuItem(title: "Capture From", action: nil, keyEquivalent: "")
         let captureMenu = NSMenu()
         captureMenu.delegate = self
@@ -243,6 +259,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let controller else { return }
         if store.isRunning {
             controller.stop()
+            stopVoice()
             endTranscript()
             panel?.orderOut(nil)
         } else {
@@ -250,6 +267,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // Shown before the awaits so "Starting…" is on screen at once.
             panel?.orderFrontRegardless()
             Task { await controller.start() }
+            startVoice()
         }
     }
 
@@ -294,6 +312,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func toggleClickThrough(_ sender: NSMenuItem) {
         style.clickThrough.toggle()
         sender.state = style.clickThrough ? .on : .off
+    }
+
+    /// Mid-meeting this starts or stops the captions at once, and leaves the
+    /// subtitles running either way.
+    @objc private func toggleTranslateMyVoice(_ sender: NSMenuItem) {
+        settings.translateMyVoice.toggle()
+        settings.save()
+        sender.state = settings.translateMyVoice ? .on : .off
+        guard store.isRunning else { return }
+        if settings.translateMyVoice { startVoice() } else { stopVoice() }
     }
 
     /// Takes effect from the next row; the pipeline itself never reads it.
@@ -344,6 +372,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem?.menu = buildMenu()
         refreshMenuTitle()
         if wasRunning { Task { await controller?.start() } }
+        // The captions follow the provider too. Relaunched without hiding the
+        // panel: colleagues watching the share should not see it blink.
+        if voice != nil {
+            voice?.stop()
+            voice = nil
+            launchVoice()
+        }
+    }
+
+    // MARK: - Translate My Voice
+
+    /// Only while subtitles run and the setting is on.
+    private func startVoice() {
+        guard settings.translateMyVoice, voice == nil else { return }
+        captionPanel?.orderFrontRegardless()
+        // Keeps the user's own subtitles out of an "Entire screen" share, so
+        // colleagues see the captions meant for them and nothing else.
+        panel?.sharingType = .none
+        launchVoice()
+    }
+
+    private func launchVoice() {
+        let provider = TranslationProvider.voiceProvider(preferring: settings.provider,
+                                                         usable: providersWithKeys)
+        let voice = VoicePipeline(captions: captionStore, provider: provider, settings: settings)
+        self.voice = voice
+        Task {
+            if let problem = await voice.start(glossary: Glossary.loadUser()) {
+                // On the subtitle panel: that is the one the user is reading.
+                store.flashNotice(problem, for: 8)
+                if self.voice === voice { stopVoice() }
+            } else if self.voice !== voice {
+                // Stopped, or replaced, while the recognizer was starting.
+                voice.stop()
+            }
+        }
+    }
+
+    private func stopVoice() {
+        voice?.stop()
+        voice = nil
+        captionPanel?.orderOut(nil)
+        captionStore.clear()
+        panel?.sharingType = .readOnly
     }
 
     @objc private func clear() { store.clear() }

@@ -24,24 +24,20 @@ struct OllamaTranslator: Translator {
     let host: URL
     let model: String
     let glossary: Glossary
-    let sourceName: String
-    let targetName: String
+    let direction: TranslationDirection
 
     init(host: URL = defaultHost,
          model: String = defaultModel,
          glossary: Glossary = .empty,
-         sourceName: String = "Japanese",
-         targetName: String = "English") {
+         direction: TranslationDirection = .japaneseToEnglish) {
         self.host = host
         self.model = model
         self.glossary = glossary
-        self.sourceName = sourceName
-        self.targetName = targetName
+        self.direction = direction
     }
 
     private var systemPrompt: String {
-        InterpreterPrompt.system(sourceName: sourceName,
-                                 targetName: targetName,
+        InterpreterPrompt.system(direction: direction,
                                  glossary: glossary,
                                  finalLineRule: InterpreterPrompt.finalTurnRule)
     }

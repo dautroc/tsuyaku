@@ -10,6 +10,9 @@ import Translation
 /// missing -- it cannot trigger a download itself. The `.translationTask`
 /// modifier can, but it must be attached to a live view in a real window, so we
 /// keep a tiny one.
+///
+/// Two pairs: Japanese into English for the subtitles, and English into
+/// Japanese for Translate My Voice. Apple installs them separately.
 @MainActor
 final class TranslationDownloadHost {
 
@@ -39,7 +42,7 @@ final class TranslationDownloadHost {
 
     private struct DownloadView: View {
         @State private var configuration: TranslationSession.Configuration?
-        @State private var message = "Preparing…"
+        @State private var message = "Download a direction to use it offline."
 
         /// - Parameter session: consumed, not shared.
         static func prepare(_ session: sending TranslationSession) async -> String {
@@ -51,18 +54,25 @@ final class TranslationDownloadHost {
             }
         }
 
+        private func download(_ direction: TranslationDirection) {
+            message = "Preparing…"
+            configuration = TranslationSession.Configuration(source: direction.sourceLanguage,
+                                                             target: direction.targetLanguage)
+        }
+
         var body: some View {
             VStack(spacing: 12) {
-                Text("Japanese → English")
+                Text("On-device translation models")
                     .font(.headline)
                 Text(message)
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
-                Button("Download model") {
-                    configuration = TranslationSession.Configuration(
-                        source: .init(identifier: "ja"),
-                        target: .init(identifier: "en"))
+                HStack {
+                    Button("Japanese → English") { download(.japaneseToEnglish) }
+                        .help("For the subtitles.")
+                    Button("English → Japanese") { download(.englishToJapanese) }
+                        .help("For Translate My Voice.")
                 }
             }
             .padding(20)

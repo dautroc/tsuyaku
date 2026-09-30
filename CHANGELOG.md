@@ -8,6 +8,46 @@ patch version moves for fixes and packaging. Nothing here is API-stable.
 
 ## [Unreleased]
 
+### Added
+
+**Translate My Voice.** Japanese captions of the user's own English, for
+Japanese colleagues who follow written English, or Japanese, better than
+spoken English. It listens to the microphone, recognizes the English on-device,
+and translates each sentence into polite business Japanese with the selected
+backend and the glossary turned around. The result goes in a second floating
+panel meant to sit inside an "Entire screen" share, since Google Meet has no way
+for an app to add captions to the call.
+
+- The panel shows the last two sentences, Japanese large and English small
+  above it, with nothing to scroll. It remembers where it was placed.
+- While it runs, the user's own subtitle panel is kept out of screen capture.
+- It starts and stops with the subtitles and ⌃⌥⌘S when **Translate My Voice**
+  is on, and toggling it mid-meeting leaves the subtitles running.
+- Qwen Omni and Gemini Live only produce English, so with either selected the
+  captions use the first configured text backend, or Apple NMT.
+- Failures fall back to on-device NMT like the subtitles do. A row that still
+  fails shows its English and no error.
+- Headphones are needed: without them the microphone also hears colleagues.
+
+`--listen-mic [s]` runs it in the terminal to check how well the recognizer
+hears a particular accent. `--apple-preflight` now checks the English →
+Japanese on-device model too, and **Install Japanese Translation…** can download
+either direction.
+
+### Fixed
+
+- Subtitles stopped when a Bluetooth headset's microphone was opened. The
+  system-audio capture was clocked on the default output, and a headset
+  switching to its hands-free "call" profile left the capture with no audio
+  and no way back. It is now clocked on the Mac's built-in output, which
+  never changes mode; the default output is used only on a Mac without one.
+
+### Changed
+
+- Text backends take a translation direction instead of source and target
+  names. The Japanese → English prompt is byte-for-byte unchanged, and a
+  self-test now holds it there.
+
 ## [0.4.0] - 2026-09-30
 
 Three things that were half-built, now reachable from the menu bar: the

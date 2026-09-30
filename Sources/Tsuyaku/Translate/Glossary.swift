@@ -22,6 +22,18 @@ struct Glossary: Sendable, Equatable {
                .joined(separator: "\n")
     }
 
+    /// The same terms the other way round, for translating the user's English
+    /// into Japanese. The file is written Japanese-first, so two Japanese
+    /// terms can share one English one (見積もり and 見積 both = quote); the
+    /// first in sorted order wins, so the choice is stable across Starts.
+    var reversed: Glossary {
+        var flipped: [String: String] = [:]
+        for (source, target) in entries.sorted(by: { $0.key < $1.key }) where flipped[target] == nil {
+            flipped[target] = source
+        }
+        return Glossary(entries: flipped)
+    }
+
     // MARK: - The user's file
 
     /// Read at every Start, so an edit takes effect the next time subtitles

@@ -27,8 +27,7 @@ struct MessagesAPITranslator: Translator {
     /// Not sent to Anthropic, where Haiku simply doesn't think unless asked.
     let disableThinking: Bool
     let glossary: Glossary
-    let sourceName: String
-    let targetName: String
+    let direction: TranslationDirection
     let sessionID: String?
 
     init(apiKey: String,
@@ -37,8 +36,7 @@ struct MessagesAPITranslator: Translator {
          providerName: String,
          disableThinking: Bool = false,
          glossary: Glossary = .empty,
-         sourceName: String = "Japanese",
-         targetName: String = "English",
+         direction: TranslationDirection = .japaneseToEnglish,
          sessionID: String? = nil) {
         self.apiKey = apiKey
         self.endpoint = endpoint
@@ -46,32 +44,36 @@ struct MessagesAPITranslator: Translator {
         self.providerName = providerName
         self.disableThinking = disableThinking
         self.glossary = glossary
-        self.sourceName = sourceName
-        self.targetName = targetName
+        self.direction = direction
         self.sessionID = sessionID
     }
 
-    static func anthropic(apiKey: String, glossary: Glossary = .empty) -> MessagesAPITranslator {
+    static func anthropic(apiKey: String, glossary: Glossary = .empty,
+                          direction: TranslationDirection = .japaneseToEnglish) -> MessagesAPITranslator {
         MessagesAPITranslator(apiKey: apiKey,
                               endpoint: URL(string: "https://api.anthropic.com/v1/messages")!,
                               model: "claude-haiku-4-5",
                               providerName: "Claude (claude-haiku-4-5)",
-                              glossary: glossary)
+                              glossary: glossary,
+                              direction: direction)
     }
 
     /// DeepSeek routes `claude-haiku-*` to `deepseek-flash`, its fast tier.
-    static func deepSeek(apiKey: String, glossary: Glossary = .empty) -> MessagesAPITranslator {
+    static func deepSeek(apiKey: String, glossary: Glossary = .empty,
+                         direction: TranslationDirection = .japaneseToEnglish) -> MessagesAPITranslator {
         MessagesAPITranslator(apiKey: apiKey,
                               endpoint: URL(string: "https://api.deepseek.com/anthropic/v1/messages")!,
                               model: "claude-haiku-4-5",
                               providerName: "DeepSeek (deepseek-flash)",
                               disableThinking: true,
-                              glossary: glossary)
+                              glossary: glossary,
+                              direction: direction)
     }
 
     static func opencodeGo(apiKey: String,
                            model: String = "deepseek-v4.1-flash",
                            glossary: Glossary = .empty,
+                           direction: TranslationDirection = .japaneseToEnglish,
                            sessionID: String = UUID().uuidString) -> MessagesAPITranslator {
         MessagesAPITranslator(apiKey: apiKey,
                               endpoint: URL(string: "https://opencode.ai/zen/go/v1/messages")!,
@@ -79,12 +81,12 @@ struct MessagesAPITranslator: Translator {
                               providerName: "OpenCode Go (\(model))",
                               disableThinking: true,
                               glossary: glossary,
+                              direction: direction,
                               sessionID: sessionID)
     }
 
     private var systemPrompt: String {
-        InterpreterPrompt.system(sourceName: sourceName,
-                                 targetName: targetName,
+        InterpreterPrompt.system(direction: direction,
                                  glossary: glossary,
                                  finalLineRule: InterpreterPrompt.finalTurnRule)
     }

@@ -126,28 +126,50 @@ enum TranslationProvider: String, CaseIterable, Sendable, Codable {
     /// checks stay inline; Ollama's reachability is left to surface as a
     /// `.failed` delta on the first translation, which names the real cause in
     /// the panel instead of pretending the user picked Apple NMT.
-    func makeTranslator(glossary: Glossary) -> any Translator {
+    ///
+    /// - Parameter direction: Japanese into English for the subtitle panel,
+    ///   English into Japanese for the caption panel. The glossary must
+    ///   already face the same way -- see `Glossary.reversed`.
+    func makeTranslator(glossary: Glossary,
+                        direction: TranslationDirection = .japaneseToEnglish) -> any Translator {
+        // Built only when returned: each one starts its own translation session.
+        let nmt = { AppleTranslator(source: direction.sourceLanguage, target: direction.targetLanguage) }
         switch self {
-        case .apple:      return AppleTranslator()
+        case .apple:      return nmt()
         case .foundation: return FoundationModelTranslator.isAvailable
-                                 ? FoundationModelTranslator(glossary: glossary)
-                                 : AppleTranslator()
-        case .ollama:     return OllamaTranslator(glossary: glossary)
+                                 ? FoundationModelTranslator(glossary: glossary, direction: direction)
+                                 : nmt()
+        case .ollama:     return OllamaTranslator(glossary: glossary, direction: direction)
         case .anthropic:
-            guard let key = Keychain.read(account: "anthropic") else { return AppleTranslator() }
-            return MessagesAPITranslator.anthropic(apiKey: key, glossary: glossary)
+            guard let key = Keychain.read(account: "anthropic") else { return nmt() }
+            return MessagesAPITranslator.anthropic(apiKey: key, glossary: glossary, direction: direction)
         case .deepseek:
-            guard let key = Keychain.read(account: "deepseek") else { return AppleTranslator() }
-            return MessagesAPITranslator.deepSeek(apiKey: key, glossary: glossary)
+            guard let key = Keychain.read(account: "deepseek") else { return nmt() }
+            return MessagesAPITranslator.deepSeek(apiKey: key, glossary: glossary, direction: direction)
         case .opencodeGo:
-            guard let key = Keychain.read(account: "opencodeGo") else { return AppleTranslator() }
-            return MessagesAPITranslator.opencodeGo(apiKey: key, model: Settings.opencodeModel, glossary: glossary)
+            guard let key = Keychain.read(account: "opencodeGo") else { return nmt() }
+            return MessagesAPITranslator.opencodeGo(apiKey: key, model: Settings.opencodeModel,
+                                                    glossary: glossary, direction: direction)
         case .qwenOmni, .geminiLive:
             // Unreachable on the audio paths, which never build a `Translator`
-            // -- see `isAudioNative`. Reached only if the key vanished between
-            // `start()` choosing the branch and this call, and then the honest
-            // answer is the same degradation every other backend makes.
-            return AppleTranslator()
+            // -- see `isAudioNative` and `voiceProvider`. Reached only if the
+            // key vanished between `start()` choosing the branch and this
+            // call, and then the honest answer is the same degradation every
+            // other backend makes.
+            return nmt()
         }
+    }
+
+    /// The text backend that translates the user's own speech.
+    ///
+    /// The user's choice when it takes text. Qwen Omni and Gemini Live only
+    /// turn speech into English, so with either of those selected the first
+    /// keyed text backend that is usable stands in, and failing that Apple's
+    /// on-device NMT. `usable` is `AppDelegate`'s cached probe, so this never
+    /// touches the keychain or the network itself.
+    static func voiceProvider(preferring preferred: TranslationProvider,
+                              usable: Set<TranslationProvider>) -> TranslationProvider {
+        if !preferred.isAudioNative { return preferred }
+        return allCases.first { !$0.isAudioNative && $0.needsKey && usable.contains($0) } ?? .apple
     }
 }

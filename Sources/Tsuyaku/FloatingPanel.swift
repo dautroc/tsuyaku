@@ -18,19 +18,58 @@ import SwiftUI
 /// With `PanelStyle.clickThrough` on, the panel ignores the mouse entirely and
 /// clicks land on whatever is underneath -- typically the meeting app's own
 /// controls, which a subtitle bar tends to sit on top of.
+///
+/// Two panels are built from this: the subtitles the user reads, and the
+/// captions of their own voice that colleagues read on the shared screen.
+/// They differ only in `Layout`.
 final class FloatingPanel: NSPanel {
 
-    private static let autosaveName = "TsuyakuPanel"
-    private static let defaultSize = NSSize(width: 620, height: 260)
-    // Below this the header truncates to nothing and a single wrapped row no
-    // longer fits.
-    private static let minimumSize = NSSize(width: 380, height: 220)
+    struct Layout {
+        let autosaveName: String
+        let defaultSize: NSSize
+        let minimumSize: NSSize
+        /// Height above the bottom of the visible frame when placed by default.
+        let bottomInset: CGFloat
+        /// Whether a relaunch keeps where the user last put it, or only its size.
+        let remembersOrigin: Bool
 
+        /// Only the size survives a relaunch. A subtitle bar has one right
+        /// place and the user's last drag is rarely it -- a panel nudged aside
+        /// to read a slide should not still be sitting there next meeting.
+        /// Below the minimum size the header truncates to nothing and a single
+        /// wrapped row no longer fits.
+        static let subtitles = Layout(autosaveName: "TsuyakuPanel",
+                                      defaultSize: NSSize(width: 620, height: 260),
+                                      minimumSize: NSSize(width: 380, height: 220),
+                                      bottomInset: 120,
+                                      remembersOrigin: false)
+
+        /// Where the captions sit is deliberate -- inside the shared area,
+        /// clear of the slides -- so a relaunch keeps it. Lower than the
+        /// subtitles by default, as subtitles on a screen are.
+        static let captions = Layout(autosaveName: "TsuyakuCaptions",
+                                     defaultSize: NSSize(width: 760, height: 160),
+                                     minimumSize: NSSize(width: 360, height: 100),
+                                     bottomInset: 24,
+                                     remembersOrigin: true)
+    }
+
+    private let layout: Layout
     private var clickThroughObserver: AnyCancellable?
 
-    init(store: SubtitleStore, style: PanelStyle) {
+    /// The subtitle panel.
+    convenience init(store: SubtitleStore, style: PanelStyle) {
+        self.init(content: SubtitleView(store: store, style: style),
+                  layout: .subtitles,
+                  clickThrough: style.$clickThrough)
+    }
+
+    /// - Parameter clickThrough: when given, the panel ignores the mouse while
+    ///   it is true. The caption panel has none: it has to be placed by hand.
+    init(content: some View, layout: Layout, clickThrough: Published<Bool>.Publisher? = nil) {
+        self.layout = layout
         super.init(
-            contentRect: NSRect(origin: .zero, size: Self.defaultSize),
+            contentRect: NSRect(origin: .zero, size: layout.defaultSize),
             styleMask: [.nonactivatingPanel, .titled, .closable, .resizable,
                         .utilityWindow, .fullSizeContentView],
             backing: .buffered,
@@ -57,7 +96,7 @@ final class FloatingPanel: NSPanel {
             standardWindowButton(button)?.isHidden = true
         }
 
-        let host = NSHostingView(rootView: SubtitleView(store: store, style: style))
+        let host = NSHostingView(rootView: content)
         // `NSHostingView` owns `contentMinSize` as part of `sizingOptions`, and
         // `[]` makes it *clear* the value asynchronously once the view is in a
         // window rather than leave it alone. The floor therefore cannot live in
@@ -67,7 +106,7 @@ final class FloatingPanel: NSPanel {
 
         // `@Published` emits the current value on subscribe, so this also
         // applies the saved setting at launch.
-        clickThroughObserver = style.$clickThrough
+        clickThroughObserver = clickThrough?
             .receive(on: DispatchQueue.main)
             .sink { [weak self] on in
                 MainActor.assumeIsolated { self?.ignoresMouseEvents = on }
@@ -79,17 +118,19 @@ final class FloatingPanel: NSPanel {
     /// `setFrameAutosaveName` only arranges for the frame to be *saved*. For a
     /// window built in code nothing ever reads it back, which is why the panel
     /// reset to its default size on every launch however the user had left it.
-    ///
-    /// Only the *size* survives a relaunch. A subtitle bar has one right place
-    /// and the user's last drag is rarely it -- a panel nudged aside to read a
-    /// slide should not still be sitting there next meeting -- so the origin is
-    /// recomputed every launch and the restored one discarded.
+    /// Whether the restored origin is kept is the layout's call.
     private func restoreFrame() {
-        setFrameAutosaveName(Self.autosaveName)
-        if !setFrameUsingName(Self.autosaveName) {
-            setContentSize(Self.defaultSize)
+        setFrameAutosaveName(layout.autosaveName)
+        guard setFrameUsingName(layout.autosaveName) else {
+            setContentSize(layout.defaultSize)
+            positionAtBottomCentre()
+            return
         }
-        positionAtBottomCentre()
+        if layout.remembersOrigin {
+            recoverIfOffScreen()
+        } else {
+            positionAtBottomCentre()
+        }
     }
 
     /// A frame saved on an external display that has since been unplugged would
@@ -117,7 +158,7 @@ final class FloatingPanel: NSPanel {
         let size = frame.size
         setFrameOrigin(NSPoint(
             x: visible.midX - size.width / 2,
-            y: visible.minY + 120
+            y: visible.minY + layout.bottomInset
         ))
     }
 
@@ -175,7 +216,7 @@ final class FloatingPanel: NSPanel {
     }
 
     override var minSize: NSSize {
-        get { Self.minimumSize }
+        get { layout.minimumSize }
         set { }
     }
 
