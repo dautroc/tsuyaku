@@ -8,6 +8,8 @@ patch version moves for fixes and packaging. Nothing here is API-stable.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-30
+
 Three things that were half-built, now reachable from the menu bar: the
 glossary, a per-app capture source, and transcripts that outlast the panel.
 A failed translation no longer costs the sentence, and the panel can be
@@ -334,7 +336,8 @@ The English-detection thresholds are unfitted (above). Sandboxing is off
 deliberately: without a provisioning profile it fights the process-tap and
 aggregate-device path for no benefit in a local build.
 
-[Unreleased]: https://github.com/dautroc/tsuyaku/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/dautroc/tsuyaku/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/dautroc/tsuyaku/releases/tag/v0.4.0
 [0.3.0]: https://github.com/dautroc/tsuyaku/releases/tag/v0.3.0
 [0.2.0]: https://github.com/dautroc/tsuyaku/releases/tag/v0.2.0
 [0.1.0]: https://github.com/dautroc/tsuyaku/releases/tag/v0.1.0
