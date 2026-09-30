@@ -1,4 +1,5 @@
 import AppKit
+import Carbon.HIToolbox
 import Combine
 import SwiftUI
 import OSLog
@@ -8,6 +9,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private let log = Logger(subsystem: "com.loind.tsuyaku", category: "app")
     private let store = SubtitleStore()
+    private let style = PanelStyle()
     private var statusItem: NSStatusItem?
     private var panel: FloatingPanel?
     private var controller: PipelineController?
@@ -25,6 +27,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Refilled every time it opens (`menuNeedsUpdate`): which apps are playing
     /// audio is only true for the moment someone looks.
     private var captureMenu: NSMenu?
+    /// ⌃⌥⌘S from any app. Nil if another app already holds the combination;
+    /// the menu then shows the plain ⌘S it always had.
+    private var hotKey: GlobalHotKey?
 
     /// The menu bar item goes up before anything reads the keychain.
     ///
@@ -41,8 +46,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The panel is built here but stays hidden: it belongs to a running
     /// session, so "Start Subtitles" shows it and "Stop Subtitles" puts it away.
     func applicationDidFinishLaunching(_ notification: Notification) {
-        panel = FloatingPanel(store: store)
+        panel = FloatingPanel(store: store, style: style)
         store.onSettled = { [weak self] rows in self?.saveSettled(rows) }
+        // Before settings load `toggle()` does nothing, so this is safe to
+        // arm this early.
+        hotKey = GlobalHotKey(keyCode: UInt32(kVK_ANSI_S),
+                              modifiers: [.control, .option, .command]) { [weak self] in
+            self?.toggle()
+        }
         setUpStatusItem()
         // `start()` flips `isRunning` after its awaits, and the pipeline can
         // stop itself on failure, so the menu title follows the store rather
@@ -131,6 +142,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let run = menu.addItem(withTitle: "Start Subtitles", action: #selector(toggle), keyEquivalent: "s")
         run.target = self
         run.tag = Tag.run
+        // Shown against the item so the shortcut can be found at all. It also
+        // works here, while the menu is open.
+        if hotKey != nil { run.keyEquivalentModifierMask = [.control, .option, .command] }
+        menu.addItem(.separator())
+
+        // Panel appearance. None of these touch the pipeline: they apply
+        // mid-sentence, with capture running.
+        let textSize = NSMenuItem(title: "Text Size", action: nil, keyEquivalent: "")
+        let sizes = NSMenu()
+        for size in PanelStyle.TextSize.allCases {
+            let item = sizes.addItem(withTitle: size.title, action: #selector(selectTextSize(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = size.rawValue
+            item.state = size == style.textSize ? .on : .off
+        }
+        textSize.submenu = sizes
+        menu.addItem(textSize)
+        let japanese = menu.addItem(withTitle: "Show Japanese",
+                                    action: #selector(toggleShowJapanese(_:)), keyEquivalent: "")
+        japanese.target = self
+        japanese.state = style.showJapanese ? .on : .off
+        japanese.toolTip = "Show the Japanese above each translation. Saved transcripts always keep it."
+        let clickThrough = menu.addItem(withTitle: "Click-Through",
+                                        action: #selector(toggleClickThrough(_:)), keyEquivalent: "")
+        clickThrough.target = self
+        clickThrough.state = style.clickThrough ? .on : .off
+        clickThrough.toolTip = "Clicks go to the window underneath. Turn off to move, resize or scroll the panel."
         menu.addItem(.separator())
         menu.addItem(withTitle: "Copy Transcript", action: #selector(copyTranscript), keyEquivalent: "c").target = self
         menu.addItem(withTitle: "Clear", action: #selector(clear), keyEquivalent: "").target = self
@@ -237,6 +275,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         settings.targetBundleIDs = ids
         settings.save()
         rebuildController()
+    }
+
+    @objc private func selectTextSize(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let size = PanelStyle.TextSize(rawValue: raw) else { return }
+        style.textSize = size
+        for item in sender.menu?.items ?? [] {
+            item.state = item.representedObject as? String == raw ? .on : .off
+        }
+    }
+
+    @objc private func toggleShowJapanese(_ sender: NSMenuItem) {
+        style.showJapanese.toggle()
+        sender.state = style.showJapanese ? .on : .off
+    }
+
+    @objc private func toggleClickThrough(_ sender: NSMenuItem) {
+        style.clickThrough.toggle()
+        sender.state = style.clickThrough ? .on : .off
     }
 
     /// Takes effect from the next row; the pipeline itself never reads it.

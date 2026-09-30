@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 
 /// The always-on-top subtitle window.
@@ -13,6 +14,10 @@ import SwiftUI
 /// the panel its resize handles. `.fullSizeContentView` reclaims the titlebar's
 /// height for the content instead, and the standard window buttons are hidden
 /// because they would float over the header text.
+///
+/// With `PanelStyle.clickThrough` on, the panel ignores the mouse entirely and
+/// clicks land on whatever is underneath -- typically the meeting app's own
+/// controls, which a subtitle bar tends to sit on top of.
 final class FloatingPanel: NSPanel {
 
     private static let autosaveName = "TsuyakuPanel"
@@ -21,7 +26,9 @@ final class FloatingPanel: NSPanel {
     // longer fits.
     private static let minimumSize = NSSize(width: 380, height: 220)
 
-    init(store: SubtitleStore) {
+    private var clickThroughObserver: AnyCancellable?
+
+    init(store: SubtitleStore, style: PanelStyle) {
         super.init(
             contentRect: NSRect(origin: .zero, size: Self.defaultSize),
             styleMask: [.nonactivatingPanel, .titled, .closable, .resizable,
@@ -50,13 +57,21 @@ final class FloatingPanel: NSPanel {
             standardWindowButton(button)?.isHidden = true
         }
 
-        let host = NSHostingView(rootView: SubtitleView(store: store))
+        let host = NSHostingView(rootView: SubtitleView(store: store, style: style))
         // `NSHostingView` owns `contentMinSize` as part of `sizingOptions`, and
         // `[]` makes it *clear* the value asynchronously once the view is in a
         // window rather than leave it alone. The floor therefore cannot live in
         // `contentMinSize`; `minSize` is overridden below instead.
         host.sizingOptions = []
         contentView = host
+
+        // `@Published` emits the current value on subscribe, so this also
+        // applies the saved setting at launch.
+        clickThroughObserver = style.$clickThrough
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] on in
+                MainActor.assumeIsolated { self?.ignoresMouseEvents = on }
+            }
 
         restoreFrame()
     }

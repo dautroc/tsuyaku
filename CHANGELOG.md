@@ -10,7 +10,8 @@ patch version moves for fixes and packaging. Nothing here is API-stable.
 
 Three things that were half-built, now reachable from the menu bar: the
 glossary, a per-app capture source, and transcripts that outlast the panel.
-And a failed translation no longer costs the sentence.
+A failed translation no longer costs the sentence, and the panel can be
+started from anywhere and fitted to the screen it is on.
 
 ### Added
 
@@ -50,6 +51,22 @@ straight to NMT for 30 s at a time instead of each paying for three failed
 attempts. A failure that retrying cannot fix, like a bad key or an on-device LLM
 refusal, falls back for that line only. Qwen Omni gets the retries but no
 fallback, since it has no source text to hand over.
+
+**Global shortcut.** ⌃⌥⌘S starts and stops subtitles from any app, and the menu
+shows it next to Start. It uses Carbon's `RegisterEventHotKey`, which needs no
+Accessibility permission. Three modifiers because the combination is taken from
+every other app while Tsuyaku runs. If another app already holds it, the menu
+keeps the plain ⌘S.
+
+**Panel controls.** Three menu items apply instantly, with capture running, and
+are kept across launches:
+- **Text Size:** Small, Medium, Large or Extra Large scales the subtitles. The
+  header stays the same size.
+- **Show Japanese:** turn it off for English only, about half the height per
+  row. A failed row keeps its Japanese, since there is no English to read in its
+  place, and transcripts always keep both.
+- **Click-Through:** the panel ignores the mouse, so it can sit over the meeting
+  app's controls. A small icon in the header shows it is on.
 
 ### Changed
 

@@ -10,6 +10,7 @@ import SwiftUI
 /// scrolling up in the history pane never hides the current speaker.
 struct SubtitleView: View {
     @ObservedObject var store: SubtitleStore
+    @ObservedObject var style: PanelStyle
 
     /// Follow-the-speaker mode for the history pane. True while it is parked
     /// at the bottom; scrolling up to read back turns it off so newly settled
@@ -43,17 +44,33 @@ struct SubtitleView: View {
             // first -- so without a floor, a short panel collapses history to
             // nothing and the live pane eats the whole window.
             historyPane.frame(minHeight: 72)
-            if store.hasLiveContent {
+            if showsLivePane {
                 Divider().opacity(0.45)
                 livePane
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
-        .animation(.easeOut(duration: 0.18), value: store.hasLiveContent)
+        .animation(.easeOut(duration: 0.18), value: showsLivePane)
         .background(.black.opacity(0.82))
         .clipShape(RoundedRectangle(cornerRadius: 12))
         .overlay(alignment: .bottomTrailing) { resizeGrip }
     }
+
+    /// The hearing preview is the recognizer's Japanese, so with Japanese
+    /// hidden it goes too -- and a live pane with nothing left in it would be
+    /// an empty band.
+    private var showsHearing: Bool { style.showJapanese && !store.hearing.isEmpty }
+    private var showsLivePane: Bool { !store.live.isEmpty || showsHearing }
+
+    // MARK: - Type
+
+    /// Subtitle text follows Text Size. The header and the "N new" pill are
+    /// controls, not subtitles, and stay put.
+    private func scaled(_ points: CGFloat) -> CGFloat { (points * style.textSize.scale).rounded() }
+    /// What the user reads: a translation, or an English turn verbatim.
+    private var subtitleFont: Font { .system(size: scaled(15), weight: .medium) }
+    /// The Japanese above a translation, and the hearing preview.
+    private var sourceFont: Font { .system(size: scaled(12)) }
 
     /// Purely a sign that says "grab here". The window's own resize tracking
     /// owns the outer few points of the frame; a grip that accepted clicks
@@ -84,6 +101,12 @@ struct SubtitleView: View {
                 .lineLimit(1)
                 .truncationMode(.tail)
             Spacer(minLength: 0)
+            // Otherwise a panel that ignores the mouse just looks broken.
+            if style.clickThrough {
+                Image(systemName: "cursorarrow.slash")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.5))
+            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
@@ -103,14 +126,16 @@ struct SubtitleView: View {
                                     // One line, at translation weight: this text
                                     // is the subtitle, not a gloss above one.
                                     Text(line.source)
-                                        .font(.system(size: 15, weight: .medium))
+                                        .font(subtitleFont)
                                         .foregroundStyle(line.failed ? .orange : .white)
                                 } else {
-                                    Text(line.source)
-                                        .font(.system(size: 12))
-                                        .foregroundStyle(.white.opacity(0.55))
+                                    if style.showsSource(of: line) {
+                                        Text(line.source)
+                                            .font(sourceFont)
+                                            .foregroundStyle(.white.opacity(0.55))
+                                    }
                                     Text(line.target.isEmpty ? " " : line.target)
-                                        .font(.system(size: 15, weight: .medium))
+                                        .font(subtitleFont)
                                         .foregroundStyle(line.failed ? .orange : .white)
                                 }
                             }
@@ -185,6 +210,22 @@ struct SubtitleView: View {
                 }
                 scroll(proxy)
             }
+            // Same shape of problem as a container change: the content grew
+            // or shrank with nobody scrolling, and the scroll rule leaves that
+            // to whoever changed it.
+            .onChange(of: style.textSize) {
+                if pinnedToBottom { snapToBottom(proxy) }
+            }
+            .onChange(of: style.showJapanese) {
+                if pinnedToBottom { snapToBottom(proxy) }
+            }
+            // Click-through leaves no way to scroll or reach the pill, so a
+            // pane left reading back would be stuck there.
+            .onChange(of: style.clickThrough) { _, on in
+                guard on else { return }
+                pinnedToBottom = true
+                scroll(proxy)
+            }
             .overlay(alignment: .bottom) { jumpToLatest(proxy) }
             .overlay { if store.history.isEmpty { placeholder } }
         }
@@ -192,7 +233,7 @@ struct SubtitleView: View {
 
     private var placeholder: some View {
         Text(store.isRunning ? "Listening…" : "Start subtitles from the menu bar")
-            .font(.system(size: 12))
+            .font(sourceFont)
             .foregroundStyle(.white.opacity(0.3))
     }
 
@@ -257,21 +298,23 @@ struct SubtitleView: View {
                         // Never reaches the "translating…" placeholder: there
                         // is no translation step to wait for.
                         Text(line.source)
-                            .font(.system(size: 15, weight: .medium))
+                            .font(subtitleFont)
                             .foregroundStyle(line.failed ? .orange : .white)
                             .lineLimit(4)
                     } else {
-                        Text(line.source)
-                            .font(.system(size: 12))
-                            .foregroundStyle(.white.opacity(0.6))
-                            .lineLimit(2)
+                        if style.showsSource(of: line) {
+                            Text(line.source)
+                                .font(sourceFont)
+                                .foregroundStyle(.white.opacity(0.6))
+                                .lineLimit(2)
+                        }
                         if line.target.isEmpty && !line.failed {
                             Text("translating…")
-                                .font(.system(size: 13))
+                                .font(.system(size: scaled(13)))
                                 .foregroundStyle(.white.opacity(0.3))
                         } else {
                             Text(line.target)
-                                .font(.system(size: 15, weight: .medium))
+                                .font(subtitleFont)
                                 .foregroundStyle(line.failed ? .orange : .white)
                                 .lineLimit(4)
                         }
@@ -280,9 +323,9 @@ struct SubtitleView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
 
-            if !store.hearing.isEmpty {
+            if showsHearing {
                 Text(store.hearing)
-                    .font(.system(size: 12))
+                    .font(sourceFont)
                     .foregroundStyle(.white.opacity(0.4))
                     .italic()
                     .lineLimit(2)

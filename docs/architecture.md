@@ -65,9 +65,11 @@ flowchart TB
 
     subgraph UI["User interface"]
         Store["SubtitleStore<br/>view model"]
+        Style["PanelStyle<br/>text size, Japanese, click-through"]
         View["SubtitleView<br/>SwiftUI"]
         Panel["FloatingPanel<br/>always-on-top"]
         Menu["Menu bar menu"]
+        HotKey["GlobalHotKey<br/>⌃⌥⌘S"]
     end
 
     subgraph Files["~/Library/Application Support/Tsuyaku"]
@@ -109,6 +111,8 @@ flowchart TB
     Rows -->|row ops| Store
 
     Store --> View
+    Style --> View
+    Style -->|clickThrough| Panel
     View --> Panel
     Panel -->|display| User[(User)]
 
@@ -118,6 +122,9 @@ flowchart TB
     Writer --> Transcripts
 
     AppDelegate{{AppDelegate}} -->|owns| Menu
+    AppDelegate -->|owns| Style
+    AppDelegate -->|owns| HotKey
+    HotKey -->|Start / Stop| AppDelegate
     AppDelegate -->|owns / shows| Panel
     AppDelegate -->|creates| Store
     AppDelegate -->|creates / toggles| PipelineController
@@ -282,6 +289,8 @@ classDiagram
         +AnyCancellable runningObserver
         +TranscriptWriter transcripts
         +NSMenu? captureMenu
+        +PanelStyle style
+        +GlobalHotKey? hotKey
         +applicationDidFinishLaunching()
         +toggle()
         +buildMenu()
@@ -292,6 +301,9 @@ classDiagram
         +editGlossary()
         +toggleSaveTranscripts(item)
         +openTranscriptsFolder()
+        +selectTextSize(item)
+        +toggleShowJapanese(item)
+        +toggleClickThrough(item)
         +installModel()
         +copyTranscript()
         +clear()
@@ -361,7 +373,8 @@ classDiagram
     }
 
     class FloatingPanel {
-        +init(store)
+        +init(store, style)
+        +Bool ignoresMouseEvents
         +orderFrontRegardless()
         +recoverIfOffScreen()
         -positionAtBottomCentre()
@@ -369,6 +382,20 @@ classDiagram
 
     class SubtitleView {
         +ObservedObject store
+        +ObservedObject style
+    }
+
+    class PanelStyle {
+        +TextSize textSize
+        +Bool showJapanese
+        +Bool clickThrough
+        +init(defaults)
+        +showsSource(of line) Bool
+    }
+
+    class GlobalHotKey {
+        +init(keyCode, modifiers, action)
+        +carbonModifiers(flags) UInt32
     }
 
     class SystemAudioTap {
@@ -561,6 +588,10 @@ classDiagram
     AppDelegate --> Settings
     AppDelegate --> TranslationDownloadHost
     AppDelegate --> TranscriptWriter
+    AppDelegate --> PanelStyle
+    AppDelegate --> GlobalHotKey
+    PanelStyle <.. SubtitleView
+    PanelStyle <.. FloatingPanel
     SubtitleStore ..> TranscriptWriter : onSettled
     PipelineController ..> Glossary : loadUser at Start
 
@@ -735,6 +766,10 @@ The tap can target a single bundle ID or all system audio except the app itself 
 
 User settings are persisted in `UserDefaults`. API keys are stored in the Keychain and are never written to defaults. On first launch, `Settings.load` prefers a configured cloud backend over the on-device Apple translator.
 
+The panel's own preferences (**Text Size**, **Show Japanese**, **Click-Through**) are in `UserDefaults` too, but through `PanelStyle` rather than `Settings`. `Settings` is a value copied into `PipelineController`, so a change to it cycles the pipeline, and SwiftUI can't observe it. `PanelStyle` is an `ObservableObject` that the panel and its view watch. Changes apply instantly, capture keeps running, and each one is saved as it happens. Transcripts, saved and copied, keep both languages whatever the panel shows.
+
+The Start/Stop shortcut, ⌃⌥⌘S, is fixed and registered with Carbon's `RegisterEventHotKey` (`GlobalHotKey`). It is the one system-wide shortcut API that needs no Accessibility permission. If another app already holds the combination, registration fails, and the menu shows the plain ⌘S instead.
+
 Two things the user owns live as files under `~/Library/Application Support/Tsuyaku` (`AppPaths`). That folder is used rather than `~/Documents`, which would trigger a macOS folder-access prompt.
 
 - **`glossary.txt`**: one `Japanese = English` per line, `#` for comments; full-width `＝` is accepted. **Edit Glossary…** creates it with a starter and opens it in the default text editor. It is not a setting: `PipelineController.start()` re-reads it through `Glossary.loadUser()` at every Start. Source terms bias the Japanese recognizer, target terms bias the English one, and the entries go into every LLM prompt. Gemini Live takes no instructions, so there the panel says the glossary is unused.
@@ -756,6 +791,7 @@ flowchart LR
         OmniModel["omniModel"]
         OpenCodeModel["opencodeModel"]
         GeminiModel["geminiModel"]
+        PanelKeys["panelTextSize / panelShowJapanese /<br/>panelClickThrough"]
     end
 
     subgraph Keychain["Keychain"]
@@ -772,6 +808,8 @@ flowchart LR
     end
 
     UserDefaults --> Settings["Settings.load() / save()"]
+    PanelKeys --> PanelStyle["PanelStyle"]
+    PanelStyle --> SubtitleView["SubtitleView / FloatingPanel"]
     Keychain --> Settings
     Keychain --> TranslationProvider["TranslationProvider.hasKey"]
 

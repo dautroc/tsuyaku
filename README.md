@@ -43,7 +43,8 @@ make test
 | On-device speech recognition | Japanese `ja-JP` recognition using Apple's `Speech` framework; free, offline, and private. |
 | Real-time translation | Four backends: Apple (on-device, free), DeepSeek (`deepseek-flash`), Anthropic (`claude-haiku-4-5`), and OpenCode Go (`deepseek-v4.1-flash`, default when a key is set). |
 | Core Audio process taps | Captures meeting audio without screen recording, virtual cables, or echo cancellation. |
-| Floating subtitle panel | Resizable subtitle window shown/hidden from the menu bar. |
+| Floating subtitle panel | Resizable subtitle window shown/hidden from the menu bar. **Text Size**, **Show Japanese** (off for English only) and **Click-Through** (clicks reach the app underneath) apply instantly. |
+| Global shortcut | ⌃⌥⌘S starts and stops subtitles from any app; no Accessibility permission needed. |
 | Automatic English detection | Optional concurrent `en-US` recognizer shows English turns verbatim; off by default. |
 | Gemini Live Translate | Optional `geminiLive` backend: streams meeting audio to `gemini-3.5-live-translate-preview`, which transcribes and translates it in the cloud with no on-device recognizer. |
 | Glossary | **Edit Glossary…** opens `glossary.txt`, one `ラクスル = Raksul` per line. Terms help recognition hear names and keep translations consistent. Changes apply at the next Start. |
