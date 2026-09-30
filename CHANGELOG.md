@@ -8,8 +8,11 @@ patch version moves for fixes and packaging. Nothing here is API-stable.
 
 ## [Unreleased]
 
-Adds a second audio-native backend, and the first one that streams. Everything
-else is unchanged and still the default; the new path is opt-in.
+## [0.3.0] - 2026-09-30
+
+Adds two translation backends -- Gemini Live Translate, the first that streams
+audio, and OpenCode Go -- and ties the subtitle panel to the running session.
+Every existing backend is unchanged; both new ones are opt-in.
 
 ### Added
 
@@ -46,7 +49,32 @@ prints every raw server message, with audio payloads elided, next to the deltas
 parsed from it. A refused setup or a wrong model ID surfaces here as the
 server's close reason, and fails at once rather than being retried.
 
-### Verified against the live API
+**OpenCode Go backend.** `opencodeGo` is a text backend on OpenCode Go's
+Anthropic-compatible Messages endpoint, built on `MessagesAPITranslator` like
+the Claude and DeepSeek ones. It sends the `x-opencode-session` header the
+gateway requires. The model defaults to `deepseek-v4.1-flash` and is chosen with
+`--opencode-model <id>`.
+
+### Changed
+
+**The subtitle panel follows the session.** Start/Stop Subtitles and Show/Hide
+Panel used to be independent, so the app could translate with nothing on screen
+or show an idle panel at every launch. They are now one menu item: Start shows
+the panel and runs the pipeline, Stop halts it and hides the panel. The panel
+stays hidden at launch, and history survives a stop until Clear. The item's
+title now follows the pipeline's real state, where it used to read "Start
+Subtitles" while running.
+
+**The panel drags from anywhere.** The history scroll view used to refuse the
+drag across most of the panel's surface. The panel's size survives a relaunch;
+its position does not, and it reopens at the bottom of the screen under the
+pointer.
+
+**Architecture documentation.** `docs/architecture.md` describes the pipelines,
+components, providers and configuration with Mermaid diagrams, and the README
+is trimmed to a quick start and feature list.
+
+### Gemini: verified against the live API
 
 With synthesised speech from `say`, not yet in a real meeting:
 
@@ -60,6 +88,8 @@ With synthesised speech from `say`, not yet in a real meeting:
 - Session-resumption handles arrive every few seconds.
 
 ### Known limitations
+
+All of these concern the Gemini path.
 
 **The last words before audio stops are not translated.** The model does not
 flush on `audioStreamEnd`; it needs silence after the speech. That is why
@@ -233,6 +263,7 @@ The English-detection thresholds are unfitted (above). Sandboxing is off
 deliberately: without a provisioning profile it fights the process-tap and
 aggregate-device path for no benefit in a local build.
 
-[Unreleased]: https://github.com/dautroc/tsuyaku/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/dautroc/tsuyaku/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/dautroc/tsuyaku/releases/tag/v0.3.0
 [0.2.0]: https://github.com/dautroc/tsuyaku/releases/tag/v0.2.0
 [0.1.0]: https://github.com/dautroc/tsuyaku/releases/tag/v0.1.0
