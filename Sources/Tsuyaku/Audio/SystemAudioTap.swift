@@ -18,16 +18,23 @@ import Synchronization
 ///
 /// ## Surviving device changes
 ///
-/// The aggregate device is built on whichever device was the default output at
-/// the time, and if that device is *removed* -- Bluetooth headphones walking
-/// out of range, a USB interface unplugged -- the IOProc stops firing and
-/// capture goes silent with no error and no callback.
+/// The aggregate device needs a real output device as its clock, and if that
+/// device goes away -- Bluetooth headphones walking out of range, a USB
+/// interface unplugged -- the IOProc stops firing and capture goes silent with
+/// no error and no callback.
 ///
-/// Note what does *not* break it: merely changing the default output while
-/// both devices remain present. The process tap captures upstream of the
-/// device, so the sub-device is little more than a clock; measured, audio
-/// keeps flowing across such a switch untouched. Rebuilding on every default
-/// change would tear down a working graph for nothing.
+/// The clock does not have to be the device the user is listening on. The
+/// process tap captures upstream of any device, so the sub-device is little
+/// more than a clock; measured, audio keeps flowing when the default output
+/// switches away from it. So the graph is built on the Mac's built-in output
+/// where there is one, and on the default output only where there is not.
+///
+/// A Bluetooth headset makes a poor clock. It sleeps when idle, it leaves, and
+/// the moment any app opens its microphone -- a Meet call, Translate My Voice
+/// -- it drops into the hands-free profile and changes rate and shape under
+/// the aggregate. Built on HUAWEI FreeClip 2 with its microphone open, the
+/// IOProc never fired again and the watchdog rebuilt every four seconds
+/// without once getting audio back.
 ///
 /// So the health signal is the audio itself. The IOProc fires continuously
 /// while the graph is alive -- ~95 times a second, silence included -- so
@@ -343,8 +350,10 @@ final class SystemAudioTap: @unchecked Sendable {
     /// Adding the tap as a sub-*device* is the classic mistake here and silently
     /// produces an aggregate that yields no audio.
     private func createAggregateDevice() throws {
-        let outputUID = try CA.deviceUID(try CA.defaultOutputDevice)
+        let clock = try CA.builtInOutputDevice ?? CA.defaultOutputDevice
+        let outputUID = try CA.deviceUID(clock)
         builtOnDeviceUID = outputUID
+        log.info("capture clocked on \(CA.deviceName(clock), privacy: .public)")
         let tapUID = try tapUID()
         let uid = "com.loind.tsuyaku.aggregate.\(UUID().uuidString)"
 

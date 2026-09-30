@@ -80,6 +80,24 @@ enum CA {
         }
     }
 
+    /// The Mac's own output -- "MacBook Pro Speakers" and the like -- or nil
+    /// on a Mac without one. Unlike a Bluetooth headset it never sleeps, never
+    /// walks out of range, and never changes shape because some app opened a
+    /// microphone.
+    static var builtInOutputDevice: AudioObjectID? {
+        let devices = (try? array(AudioObjectID(kAudioObjectSystemObject),
+                                  address(kAudioHardwarePropertyDevices),
+                                  of: AudioObjectID.self)) ?? []
+        return devices.first { device in
+            let transport: UInt32 = (try? value(device, address(kAudioDevicePropertyTransportType),
+                                                default: UInt32(0))) ?? 0
+            guard transport == kAudioDeviceTransportTypeBuiltIn else { return false }
+            let outputs = (try? dataSize(device, address(kAudioDevicePropertyStreams,
+                                                         kAudioObjectPropertyScopeOutput))) ?? 0
+            return outputs > 0
+        }
+    }
+
     static func deviceUID(_ device: AudioObjectID) throws -> String {
         try string(device, address(kAudioDevicePropertyDeviceUID))
     }
