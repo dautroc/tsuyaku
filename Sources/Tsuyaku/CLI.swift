@@ -18,11 +18,13 @@ enum CLI {
       --probe                     report framework/model/asset status
       --install-assets            download the on-device speech model (see --locale)
       --apple-preflight           check the Apple ja->en translation model
-      --set-key <provider> <key>  store a key (provider: anthropic | deepseek | opencodeGo | qwenOmni)
-      --provider <name>           apple | foundation | ollama | anthropic | deepseek | opencodeGo | qwenOmni (default: saved setting)
+      --set-key <provider> <key>  store a key (provider: anthropic | deepseek | opencodeGo | qwenOmni | geminiLive)
+      --provider <name>           apple | foundation | ollama | anthropic | deepseek | opencodeGo | qwenOmni | geminiLive (default: saved setting)
       --opencode-model <id>       OpenCode Go model ID (default: deepseek-v4.1-flash)
       --omni-model <id>           Qwen omni model ID (default: qwen3-omni-flash)
       --omni-test [file.wav]      send one WAV to Qwen omni and print the reply
+      --gemini-model <id>         Gemini Live model ID (default: gemini-3.5-live-translate-preview)
+      --gemini-test [file.wav]    stream one WAV to Gemini Live and print every server event
       --locale <bcp47>            speech locale for --listen / --install-assets (default: ja-JP)
       --compare                   run every configured backend over a Japanese fixture set
       --capture [bundle|global] [s]   dump captured audio to /tmp/tsuyaku-capture.wav
@@ -118,6 +120,63 @@ enum CLI {
             }
         }
         return (out, first ?? .zero)
+    }
+
+    /// Any audio file, decoded and converted to the 16 kHz mono Int16 the
+    /// audio backends are fed. A `--capture` recording is already close, but
+    /// `AVAudioFile` hands back float32 whatever is on disk.
+    static func readCaptureFormat(_ path: String) throws -> AVAudioPCMBuffer {
+        let file = try AVAudioFile(forReading: URL(fileURLWithPath: path))
+        let source = file.processingFormat
+        let target = WAVEncoder.captureFormat
+        guard let input = AVAudioPCMBuffer(pcmFormat: source,
+                                           frameCapacity: AVAudioFrameCount(file.length)),
+              let converter = AVAudioConverter(from: source, to: target) else {
+            throw CA.Err(status: -1, op: "AVAudioConverter(\(source) -> \(target))")
+        }
+        try file.read(into: input)
+        converter.downmix = true
+
+        let capacity = AVAudioFrameCount(Double(input.frameLength) * target.sampleRate / source.sampleRate) + 1024
+        guard let output = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: capacity) else {
+            throw CA.Err(status: -1, op: "allocate output buffer")
+        }
+        // The input block is `@Sendable`; a box keeps the one-shot handoff
+        // honest without capturing a mutable local.
+        final class Once: @unchecked Sendable { var buffer: AVAudioPCMBuffer? }
+        let once = Once()
+        once.buffer = input
+        var error: NSError?
+        let status = converter.convert(to: output, error: &error) { _, outStatus in
+            guard let b = once.buffer else {
+                outStatus.pointee = .endOfStream
+                return nil
+            }
+            once.buffer = nil
+            outStatus.pointee = .haveData
+            return b
+        }
+        if status == .error { throw error ?? CA.Err(status: -1, op: "convert") }
+        return output
+    }
+
+    /// `buffer` cut into consecutive buffers of `frames` frames each.
+    static func slice(_ buffer: AVAudioPCMBuffer, frames: Int) -> [AudioChunk] {
+        guard let source = buffer.int16ChannelData?[0] else { return [] }
+        var out: [AudioChunk] = []
+        var offset = 0
+        let total = Int(buffer.frameLength)
+        while offset < total {
+            let n = min(frames, total - offset)
+            guard let b = AVAudioPCMBuffer(pcmFormat: buffer.format,
+                                           frameCapacity: AVAudioFrameCount(n)),
+                  let dest = b.int16ChannelData?[0] else { break }
+            dest.update(from: source + offset, count: n)
+            b.frameLength = AVAudioFrameCount(n)
+            out.append(AudioChunk(buffer: b, hostTime: 0))
+            offset += n
+        }
+        return out
     }
 
     static func run() async throws {
@@ -269,7 +328,7 @@ enum CLI {
             guard CommandLine.arguments.count > i+2,
                   let provider = TranslationProvider(rawValue: CommandLine.arguments[i+1]),
                   let account = provider.keychainAccount else {
-                print("usage: --set-key <anthropic|deepseek|opencodeGo|qwenOmni> <key>"); exit(1)
+                print("usage: --set-key <anthropic|deepseek|opencodeGo|qwenOmni|geminiLive> <key>"); exit(1)
             }
             let ok = Keychain.write(CommandLine.arguments[i+2], account: account)
             print(ok ? "\(provider.displayName) key stored in login keychain."
@@ -343,12 +402,111 @@ enum CLI {
             exit(0)
         }
 
+        if let i = CommandLine.arguments.firstIndex(of: "--gemini-model"),
+           CommandLine.arguments.count > i+1 {
+            Settings.geminiModel = CommandLine.arguments[i+1]
+            print("gemini model set to \(Settings.geminiModel)")
+            if !CommandLine.arguments.contains("--gemini-test") { exit(0) }
+        }
+
+        // The wire-format check for the live path, and the way to learn what
+        // the server actually sends: every message is printed raw (audio
+        // elided) alongside the deltas parsed from it. A refused setup, a
+        // wrong model ID or a misplaced config field all surface here as the
+        // server's close reason.
+        if let i = CommandLine.arguments.firstIndex(of: "--gemini-test") {
+            guard let key = Keychain.read(account: "gemini") else {
+                print("no key -- run: --set-key geminiLive <key>"); exit(1)
+            }
+            let path = CommandLine.arguments.count > i+1
+                && !CommandLine.arguments[i+1].hasPrefix("--")
+                ? CommandLine.arguments[i+1] : nil
+
+            let audio: AVAudioPCMBuffer
+            if let path {
+                do {
+                    audio = try readCaptureFormat(path)
+                } catch {
+                    print("cannot read \(path): \(error)"); exit(1)
+                }
+            } else {
+                // Proves auth, model ID and setup framing. The model hears
+                // nothing, so expect setupComplete and no transcription.
+                guard let b = AVAudioPCMBuffer(pcmFormat: WAVEncoder.captureFormat,
+                                               frameCapacity: 16_000) else {
+                    print("could not synthesise test audio"); exit(1)
+                }
+                b.frameLength = 16_000
+                print("no file given -- sending 1s of silence (expect setupComplete, no text)")
+                audio = b
+            }
+
+            let echo = Settings.load().autoDetectLanguage
+            let started = ContinuousClock.now
+            let stamp = { @Sendable in
+                let d = started.duration(to: .now).components
+                return String(format: "%6.2fs", Double(d.seconds) + Double(d.attoseconds) / 1e18)
+            }
+            let t = GeminiLiveTranslator(apiKey: key, model: Settings.geminiModel,
+                                         echoTargetLanguage: echo) { raw in
+                print("\(stamp())  \u{1B}[90m<- \(raw)\u{1B}[0m")
+            }
+            let seconds = Double(audio.frameLength) / WAVEncoder.captureFormat.sampleRate
+            print("model:    \(Settings.geminiModel)")
+            print("endpoint: \(GeminiLiveTranslator.endpoint.absoluteString)")
+            print("echo:     \(echo) (follows Detect English Automatically)")
+            print("audio:    \(String(format: "%.1f", seconds))s + 3s of trailing silence, streamed in real time")
+
+            // Real time, not as fast as possible: the server's turn detection
+            // runs on the audio's own clock. The trailing silence is not
+            // padding for its own sake -- the model does not flush on
+            // `audioStreamEnd`, and without it the last sentence of a
+            // recording is never transcribed or translated.
+            let (stream, feed) = AsyncStream.makeStream(of: AudioChunk.self)
+            var chunks = slice(audio, frames: 1_600)
+            if let silence = AVAudioPCMBuffer(pcmFormat: WAVEncoder.captureFormat, frameCapacity: 48_000) {
+                silence.frameLength = 48_000
+                chunks += slice(silence, frames: 1_600)
+            }
+            let feeder = Task {
+                for c in chunks {
+                    feed.yield(c)
+                    try? await Task.sleep(for: .milliseconds(100))
+                }
+                feed.finish()
+            }
+
+            var source = "", target = "", failure: String?
+            for await delta in t.translate(stream) {
+                switch delta {
+                case .source(let x, let lang):
+                    source += x
+                    print("\(stamp())  \u{1B}[1mIN \u{1B}[0m(\(lang ?? "?")) \(x)")
+                case .target(let x, let lang):
+                    target += x
+                    print("\(stamp())  \u{1B}[1;32mOUT\u{1B}[0m(\(lang ?? "?")) \(x)")
+                case .turnEnd:
+                    print("\(stamp())  -- turn end --")
+                case .reconnecting:
+                    print("\(stamp())  -- reconnecting --")
+                case .failed(let m):
+                    failure = m
+                }
+            }
+            feeder.cancel()
+            if let failure { print("FAILED: \(failure)"); exit(1) }
+            print("\nIN  \(source.isEmpty ? "(empty)" : source)")
+            print("OUT \(target.isEmpty ? "(empty)" : target)")
+            exit(0)
+        }
+
         if let i = CommandLine.arguments.firstIndex(of: "--translate-text") {
             let text = CommandLine.arguments.count > i+1 ? CommandLine.arguments[i+1]
                                                          : "それでは本日の定例会議を始めます。"
             let provider = selectedProvider() ?? .apple
             if provider.isAudioNative {
-                print("\(provider.rawValue) takes audio, not text -- use --omni-test <file.wav>")
+                let test = provider.isLiveStream ? "--gemini-test" : "--omni-test"
+                print("\(provider.rawValue) takes audio, not text -- use \(test) <file.wav>")
                 exit(1)
             }
             if let why = provider.unusableReason {

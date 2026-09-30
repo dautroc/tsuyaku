@@ -98,6 +98,13 @@ final class SubtitleStore: ObservableObject {
         live[i].target += delta
     }
 
+    /// For the live path, where the source transcript streams in alongside
+    /// the translation instead of arriving whole before it.
+    func appendSource(utterance: UUID, delta: String) {
+        guard let i = liveIndex(utterance) else { return }
+        live[i].source += delta
+    }
+
     func fail(utterance: UUID, message: String) {
         guard let i = liveIndex(utterance) else { return }
         // Never blank a subtitle on a translation failure: the source line is

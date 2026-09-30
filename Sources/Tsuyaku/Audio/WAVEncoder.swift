@@ -29,13 +29,7 @@ enum WAVEncoder {
     ///   treat as "nothing to send" rather than as an error.
     static func encode(_ buffers: [AVAudioPCMBuffer],
                        sampleRate: Double = 16_000) -> Data? {
-        var samples = Data()
-        for buffer in buffers {
-            guard let channel = buffer.int16ChannelData else { continue }
-            let count = Int(buffer.frameLength)
-            guard count > 0 else { continue }
-            samples.append(UnsafeBufferPointer(start: channel[0], count: count))
-        }
+        let samples = pcm(buffers)
         guard !samples.isEmpty else { return nil }
 
         let channels: UInt16 = 1
@@ -59,6 +53,20 @@ enum WAVEncoder {
         out.append(le: UInt32(samples.count))
         out.append(samples)
         return out
+    }
+
+    /// The bare little-endian Int16 samples of `buffers`, concatenated, with no
+    /// header. What `encode` wraps, and what the Gemini Live stream sends as
+    /// `audio/pcm` -- a stream has no file to declare a container for.
+    static func pcm(_ buffers: [AVAudioPCMBuffer]) -> Data {
+        var samples = Data()
+        for buffer in buffers {
+            guard let channel = buffer.int16ChannelData else { continue }
+            let count = Int(buffer.frameLength)
+            guard count > 0 else { continue }
+            samples.append(UnsafeBufferPointer(start: channel[0], count: count))
+        }
+        return samples
     }
 
     /// Seconds of audio in a set of buffers, for cost logging and for the

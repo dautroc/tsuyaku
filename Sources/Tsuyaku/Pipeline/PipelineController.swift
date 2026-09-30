@@ -17,6 +17,10 @@ final class PipelineController {
     private var tap: SystemAudioTap?
     private var transcribers: [AppleTranscriber] = []
     private var segmenter: VoiceSegmenter?
+    /// Row state for the live path. Mutated from two tasks -- the delta
+    /// consumer and the idle ticker -- which is safe because both run on the
+    /// main actor with this controller.
+    private var liveRows = LiveRowSegmenter()
     private var tasks: [Task<Void, Never>] = []
 
     /// Recent (source, translated) pairs handed to the translator as context.
@@ -34,12 +38,16 @@ final class PipelineController {
         do {
             let glossary = settings.glossary
 
-            // The omni backend consumes audio directly, so it needs no
+            // The audio backends consume audio directly, so they need no
             // transcription graph at all -- and must not build one, since
             // `TranscriberFactory.make` downloads and starts `SpeechAnalyzer`
             // assets that would then sit idle.
             if settings.provider.isAudioNative {
-                try await startAudioNative(glossary: glossary)
+                if settings.provider.isLiveStream {
+                    try startLive(glossary: glossary)
+                } else {
+                    try await startAudioNative(glossary: glossary)
+                }
                 return
             }
 
@@ -163,7 +171,7 @@ final class PipelineController {
     ///     speech itself, so the setting is simply inert on this path.
     private func startAudioNative(glossary: Glossary) async throws {
         guard let translator = settings.provider.makeAudioTranslator(glossary: glossary) else {
-            throw AudioNativeError.noKey
+            throw AudioNativeError.noKey(settings.provider)
         }
 
         // Nobody negotiates a format on this path, so the tap is pinned to what
@@ -227,10 +235,82 @@ final class PipelineController {
         }
     }
 
+    /// Speech straight to the target language over one streaming session.
+    ///
+    ///   tap -> live session -> row segmenter -> store
+    ///
+    /// No `VoiceSegmenter`: the model translates as it hears and wants the
+    /// audio continuously -- silence included, which is also what makes it
+    /// finish a sentence. Unlike the omni path the
+    /// source transcript does exist here, streamed back by the server, so rows
+    /// carry the Japanese and the "hearing" line works.
+    ///
+    /// "Detect English Automatically" keeps its meaning on this path: it
+    /// becomes the model's `echoTargetLanguage`, so English turns come through
+    /// verbatim with it on and are skipped with it off. The glossary and
+    /// context turns have nowhere to go -- the model accepts no instructions.
+    private func startLive(glossary: Glossary) throws {
+        let echo = settings.autoDetectLanguage
+        guard let translator = settings.provider.makeLiveTranslator(echoEnglish: echo) else {
+            throw AudioNativeError.noKey(settings.provider)
+        }
+        if !glossary.isEmpty {
+            log.info("glossary not applied: \(self.settings.provider.rawValue, privacy: .public) takes no instructions")
+        }
+
+        let tap = SystemAudioTap(bundleIDs: settings.targetBundleIDs,
+                                 outputFormat: WAVEncoder.captureFormat) { [weak self] event in
+            Task { @MainActor in self?.handleRecovery(event) }
+        }
+        var tuning = LiveRowSegmenter.Tuning()
+        tuning.threshold = settings.languageThreshold
+
+        try tap.start()
+        self.tap = tap
+        liveRows = LiveRowSegmenter(tuning: tuning)
+        store.autoDetecting = echo
+        store.activeLanguage = nil
+
+        tasks = [
+            Task { await self.consume(translator.translate(tap.buffers)) },
+            Task { await self.tickForever { await self.tickLive() } },
+        ]
+
+        store.isRunning = true
+        store.status = "Listening"
+        log.info("pipeline started (live, \(Settings.geminiModel, privacy: .public))")
+    }
+
+    private func consume(_ deltas: AsyncStream<LiveDelta>) async {
+        for await delta in deltas {
+            switch delta {
+            case .reconnecting:
+                // Routine every ten minutes or so, but the handover can leave
+                // a gap in the subtitles, and a gap should have a reason.
+                store.flashNotice("Reconnecting to Gemini…")
+            case .failed(let message):
+                store.apply(liveRows.flush())
+                // Nothing will retry after this, so the notice is not transient.
+                log.error("live session lost: \(message, privacy: .public)")
+                store.notice = "Translation lost — stop and start subtitles again"
+                store.status = "Translation failed: \(message)"
+            default:
+                store.apply(liveRows.ingest(delta, now: .now))
+            }
+        }
+    }
+
+    private func tickLive() {
+        store.apply(liveRows.tick(now: .now))
+    }
+
     enum AudioNativeError: Error, LocalizedError {
-        case noKey
+        case noKey(TranslationProvider)
         var errorDescription: String? {
-            "no Model Studio key -- run: --set-key qwenOmni <key>"
+            switch self {
+            case .noKey(let provider):
+                "no \(provider.displayName) key -- run: --set-key \(provider.rawValue) <key>"
+            }
         }
     }
 
@@ -252,6 +332,8 @@ final class PipelineController {
         if let vad { Task { await vad.finish() } }
         tasks.forEach { $0.cancel() }
         tasks.removeAll()
+        // A live row still open would otherwise stay in the live pane for good.
+        store.apply(liveRows.flush())
         Task { for e in engines { await e.finish() } }
         store.isRunning = false
         store.hearing = ""

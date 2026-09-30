@@ -45,6 +45,7 @@ make test
 | Core Audio process taps | Captures meeting audio without screen recording, virtual cables, or echo cancellation. |
 | Floating subtitle panel | Resizable subtitle window shown/hidden from the menu bar. |
 | Automatic English detection | Optional concurrent `en-US` recognizer shows English turns verbatim; off by default. |
+| Gemini Live Translate | Optional `geminiLive` backend: streams meeting audio to `gemini-3.5-live-translate-preview`, which transcribes and translates it in the cloud with no on-device recognizer. |
 | Settings persistence | Provider choice and API keys in the keychain survive relaunches. |
 
 Choose a backend from the menu bar or with `--provider`. Store API keys in the keychain with:
@@ -53,4 +54,11 @@ Choose a backend from the menu bar or with `--provider`. Store API keys in the k
 ./build/Tsuyaku.app/Contents/MacOS/Tsuyaku --set-key <provider> <key>
 ```
 
-Supported key-backed providers: `anthropic`, `deepseek`, `opencodeGo`, `qwenOmni`. Use `--opencode-model <id>` to pick a different OpenCode Go model.
+Supported key-backed providers: `anthropic`, `deepseek`, `opencodeGo`, `qwenOmni`, `geminiLive`. Use `--opencode-model <id>` to pick a different OpenCode Go model.
+
+Before relying on Gemini Live in a meeting, check the key and model against a recording:
+
+```bash
+./build/Tsuyaku.app/Contents/MacOS/Tsuyaku --capture global 20
+./build/Tsuyaku.app/Contents/MacOS/Tsuyaku --gemini-test /tmp/tsuyaku-capture.wav
+```

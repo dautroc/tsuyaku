@@ -34,6 +34,22 @@ enum SentenceSplitter {
         return (sentences, current.trimmingCharacters(in: .whitespaces))
     }
 
+    /// Where the first complete sentence in `text` ends: the index just past
+    /// its terminator, or nil if there is none yet. The same rules as `split`,
+    /// for callers that must cut a fragment at the boundary rather than
+    /// receive it trimmed.
+    static func firstEnd(in text: String,
+                         terminators: Set<Character>,
+                         abbreviations: Set<String> = []) -> String.Index? {
+        let chars = Array(text)
+        for i in chars.indices where terminators.contains(chars[i]) {
+            if chars[i] != "." || isTerminalPeriod(chars, at: i, abbreviations: abbreviations) {
+                return text.index(text.startIndex, offsetBy: i + 1)
+            }
+        }
+        return nil
+    }
+
     /// Whether the '.' at `i` actually ends a sentence.
     ///
     /// A '.' at the end of the buffer still terminates unless a guard fires.

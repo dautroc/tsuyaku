@@ -28,6 +28,7 @@ enum StoreSelfTest {
         scrollRuleSurvivesTheLivePane()
         scrollRuleLetsTheUserReadBack()
         failures += PickerSelfTest.run()
+        failures += LiveSelfTest.run()
         print(failures == 0 ? "\nall checks passed" : "\n\(failures) CHECK(S) FAILED")
         exit(failures == 0 ? 0 : 1)
     }

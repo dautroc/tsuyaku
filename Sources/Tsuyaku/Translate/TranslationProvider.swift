@@ -9,6 +9,7 @@ enum TranslationProvider: String, CaseIterable, Sendable, Codable {
     case deepseek
     case opencodeGo
     case qwenOmni
+    case geminiLive
 
     var displayName: String {
         switch self {
@@ -19,6 +20,7 @@ enum TranslationProvider: String, CaseIterable, Sendable, Codable {
         case .deepseek:   "DeepSeek (deepseek-flash)"
         case .opencodeGo: "OpenCode Go (\(Settings.opencodeModel))"
         case .qwenOmni:   "Qwen Omni (speech \u{2192} English, cloud)"
+        case .geminiLive: "Gemini Live Translate (speech \u{2192} English, cloud)"
         }
     }
 
@@ -30,6 +32,7 @@ enum TranslationProvider: String, CaseIterable, Sendable, Codable {
         case .deepseek:           "deepseek"
         case .opencodeGo:         "opencodeGo"
         case .qwenOmni:           "dashscope"
+        case .geminiLive:         "gemini"
         }
     }
 
@@ -58,7 +61,7 @@ enum TranslationProvider: String, CaseIterable, Sendable, Codable {
                 : FoundationModelTranslator.describe(FoundationModelTranslator.availability)
         case .ollama:
             return OllamaTranslator.probe()
-        case .anthropic, .deepseek, .opencodeGo, .qwenOmni:
+        case .anthropic, .deepseek, .opencodeGo, .qwenOmni, .geminiLive:
             return hasKey ? nil : "no key -- run: --set-key \(rawValue) <key>"
         }
     }
@@ -68,7 +71,12 @@ enum TranslationProvider: String, CaseIterable, Sendable, Codable {
     /// The one bit `PipelineController` needs to decide whether to build a
     /// transcription graph at all. Kept here so adding a second audio-native
     /// backend later is one case, not a search for every `== .qwenOmni`.
-    var isAudioNative: Bool { self == .qwenOmni }
+    var isAudioNative: Bool { self == .qwenOmni || self == .geminiLive }
+
+    /// Whether this backend holds one streaming session open instead of taking
+    /// cut utterances. Only meaningful when `isAudioNative`: it chooses between
+    /// the two audio graphs, one with a `VoiceSegmenter` and one without.
+    var isLiveStream: Bool { self == .geminiLive }
 
     /// One probe, not two: `unusableReason` is the single source of truth.
     var isUsable: Bool { unusableReason == nil }
@@ -80,6 +88,16 @@ enum TranslationProvider: String, CaseIterable, Sendable, Codable {
         return QwenOmniTranslator(apiKey: key,
                                   model: Settings.omniModel,
                                   glossary: glossary)
+    }
+
+    /// The streaming counterpart to `makeAudioTranslator`, nil for every other
+    /// backend. Takes no glossary: the translate model accepts no instructions.
+    func makeLiveTranslator(echoEnglish: Bool) -> (any LiveTranslator)? {
+        guard case .geminiLive = self,
+              let key = Keychain.read(account: "gemini") else { return nil }
+        return GeminiLiveTranslator(apiKey: key,
+                                    model: Settings.geminiModel,
+                                    echoTargetLanguage: echoEnglish)
     }
 
     /// Builds the backend, degrading to on-device NMT when the backend is
@@ -110,8 +128,8 @@ enum TranslationProvider: String, CaseIterable, Sendable, Codable {
         case .opencodeGo:
             guard let key = Keychain.read(account: "opencodeGo") else { return AppleTranslator() }
             return MessagesAPITranslator.opencodeGo(apiKey: key, model: Settings.opencodeModel, glossary: glossary)
-        case .qwenOmni:
-            // Unreachable on the omni path, which never builds a `Translator`
+        case .qwenOmni, .geminiLive:
+            // Unreachable on the audio paths, which never build a `Translator`
             // -- see `isAudioNative`. Reached only if the key vanished between
             // `start()` choosing the branch and this call, and then the honest
             // answer is the same degradation every other backend makes.

@@ -2,7 +2,7 @@
 
 Tsuyaku is a macOS menu-bar app that captures another application's audio output, transcribes it on-device with Apple's `SpeechAnalyzer`, translates the recognized Japanese into English, and renders the result as a floating, always-on-top subtitle panel.
 
-A second backend family, **Qwen Omni**, skips transcription entirely and translates straight from audio to English text.
+A second backend family skips on-device transcription entirely and translates straight from audio to English text: **Qwen Omni**, one request per utterance, and **Gemini Live Translate**, one streaming session for the whole meeting.
 
 ---
 
@@ -12,11 +12,12 @@ A second backend family, **Qwen Omni**, skips transcription entirely and transla
 2. [Runtime pipeline (single-language STT)](#2-runtime-pipeline-single-language-stt)
 3. [Runtime pipeline (auto-detect STT)](#3-runtime-pipeline-auto-detect-stt)
 4. [Runtime pipeline (audio-native Qwen Omni)](#4-runtime-pipeline-audio-native-qwen-omni)
-5. [Component responsibilities](#5-component-responsibilities)
-6. [Translation provider hierarchy](#6-translation-provider-hierarchy)
-7. [Audio capture and recovery](#7-audio-capture-and-recovery)
-8. [Configuration and secrets](#8-configuration-and-secrets)
-9. [CLI diagnostics](#9-cli-diagnostics)
+5. [Runtime pipeline (live Gemini Translate)](#5-runtime-pipeline-live-gemini-translate)
+6. [Component responsibilities](#6-component-responsibilities)
+7. [Translation provider hierarchy](#7-translation-provider-hierarchy)
+8. [Audio capture and recovery](#8-audio-capture-and-recovery)
+9. [Configuration and secrets](#9-configuration-and-secrets)
+10. [CLI diagnostics](#10-cli-diagnostics)
 
 ---
 
@@ -44,6 +45,7 @@ flowchart TB
         EnGate["SegmentGate<br/>English"]
         Picker["LanguagePicker"]
         Segmenter["VoiceSegmenter<br/>audio-native"]
+        Rows["LiveRowSegmenter<br/>live"]
     end
 
     subgraph TextTranslate["Text translation backends"]
@@ -56,6 +58,7 @@ flowchart TB
 
     subgraph AudioTranslate["Audio-native translation"]
         Omni["QwenOmniTranslator<br/>speech → English"]
+        Gemini["GeminiLiveTranslator<br/>streaming speech → English"]
     end
 
     subgraph UI["User interface"]
@@ -93,6 +96,10 @@ flowchart TB
     Segmenter -->|Utterance WAV| Omni
     Omni -->|TranslationDelta| Store
 
+    Converter -->|AudioChunk| Gemini
+    Gemini -->|LiveDelta| Rows
+    Rows -->|row ops| Store
+
     Store --> View
     View --> Panel
     Panel -->|display| User[(User)]
@@ -106,7 +113,7 @@ flowchart TB
 `PipelineController` decides at startup which branch to build:
 
 - Text providers (`apple`, `foundation`, `ollama`, `anthropic`, `deepseek`, `opencodeGo`) build an `AppleTranscriber`-based graph.
-- The audio-native provider (`qwenOmni`) builds a `VoiceSegmenter`-based graph instead and bypasses speech recognition.
+- The audio-native providers bypass speech recognition. `qwenOmni` builds a `VoiceSegmenter`-based graph; `geminiLive` streams the audio into one live session with no segmenter at all.
 
 ---
 
@@ -218,7 +225,30 @@ On this path:
 
 ---
 
-## 5. Component responsibilities
+## 5. Runtime pipeline (live Gemini Translate)
+
+The `geminiLive` provider holds one WebSocket session to `gemini-3.5-live-translate-preview` open for the whole meeting and streams the tap's audio into it continuously, in 100 ms frames of 16 kHz mono PCM. The server returns the source transcript and the English translation as two interleaved streams of fragments.
+
+```mermaid
+flowchart LR
+    Tap["SystemAudioTap<br/>16 kHz mono"] -->|AudioChunk| Gemini["GeminiLiveTranslator<br/>WebSocket session"]
+    Gemini -->|"LiveDelta<br/>source / target"| Rows["LiveRowSegmenter"]
+    Rows -->|"hearing / begin / source<br/>target / finish"| Store["SubtitleStore"]
+    Store --> Panel["FloatingPanel / SubtitleView"]
+    Ticker["tick every 500 ms"] -.->|idle close| Rows
+```
+
+On this path:
+
+- There is no `VoiceSegmenter` and no `SegmentGate`. The model translates as it hears and sends no turn boundaries, so `LiveRowSegmenter` cuts rows from the text: one row per English sentence, closing after 2.5 s of output silence otherwise.
+- Source text does exist, streamed back by the server. Source heard between rows shows on the `hearing` line; source heard while a row is open joins that row.
+- "Detect English Automatically" becomes the model's `echoTargetLanguage`. With it on, English speech is echoed back verbatim and rendered as an English row; with it off, English produces nothing.
+- The glossary and context turns are not used: the translate model accepts no instructions.
+- Connections are replaced on `goAway` using session-resumption handles. `GeminiLiveTranslator` keeps up to five seconds of audio buffered across the handover.
+
+---
+
+## 6. Component responsibilities
 
 ```mermaid
 classDiagram
@@ -249,15 +279,19 @@ classDiagram
         +SystemAudioTap? tap
         +[AppleTranscriber] transcribers
         +VoiceSegmenter? segmenter
+        +LiveRowSegmenter liveRows
         +[Task] tasks
         +start() async
         +stop()
         +handleRecovery(event)
         -startAudioNative(glossary)
+        -startLive(glossary)
         -makeTranslator(glossary) any Translator
         -consume(events, language, using translator)
         -consume(decided, using translator)
         -consume(utterances, using audioTranslator)
+        -consume(deltas)
+        -tickLive()
     }
 
     class SubtitleStore {
@@ -272,6 +306,8 @@ classDiagram
         +Int settledCount
         +beginLine(utterance:source:provisional:language)
         +append(utterance:delta)
+        +appendSource(utterance:delta)
+        +apply(ops)
         +fail(utterance:message)
         +finishLine(utterance)
         +settle(utterance)
@@ -379,6 +415,25 @@ classDiagram
         +translate(audio, context)
     }
 
+    class LiveTranslator {
+        <<protocol>>
+        +translate(audio: AsyncStream~AudioChunk~) AsyncStream~LiveDelta~
+    }
+
+    class GeminiLiveTranslator {
+        +String apiKey
+        +String model
+        +Bool echoTargetLanguage
+        +translate(audio)
+    }
+
+    class LiveRowSegmenter {
+        +Tuning tuning
+        +ingest(LiveDelta, now) [Op]
+        +tick(now) [Op]
+        +flush() [Op]
+    }
+
     class Settings {
         +Locale sourceLocale
         +Locale secondaryLocale
@@ -392,6 +447,8 @@ classDiagram
         +TranslationProvider provider
         +Glossary glossary
         +static String omniModel
+        +static String opencodeModel
+        +static String geminiModel
         +load() Settings
         +save()
     }
@@ -405,14 +462,17 @@ classDiagram
         deepseek
         opencodeGo
         qwenOmni
+        geminiLive
         +String? keychainAccount
         +Bool needsKey
         +Bool hasKey
         +String? unusableReason
         +Bool isAudioNative
+        +Bool isLiveStream
         +Bool isUsable
         +makeTranslator(glossary) any Translator
         +makeAudioTranslator(glossary) any AudioTranslator?
+        +makeLiveTranslator(echoEnglish) any LiveTranslator?
     }
 
     class TranslationDownloadHost {
@@ -436,6 +496,8 @@ classDiagram
     PipelineController --> Translator
     PipelineController --> AudioTranslator
     PipelineController --> VoiceSegmenter
+    PipelineController --> LiveTranslator
+    PipelineController --> LiveRowSegmenter
     PipelineController --> SubtitleStore
 
     TranscriberFactory --> AppleTranscriber
@@ -444,19 +506,22 @@ classDiagram
     LanguagePicker --> Translator
     Translator --> SubtitleStore
     AudioTranslator --> SubtitleStore
+    LiveTranslator <|.. GeminiLiveTranslator
+    LiveRowSegmenter --> SubtitleStore
     SubtitleStore --> SubtitleView
     SubtitleView --> FloatingPanel
 
     TranslationProvider ..> Translator
     TranslationProvider ..> AudioTranslator
+    TranslationProvider ..> LiveTranslator
     Settings --> TranslationProvider
 ```
 
 ---
 
-## 6. Translation provider hierarchy
+## 7. Translation provider hierarchy
 
-The app ships with six providers. The user's choice is stored in `Settings`; API keys live in the Keychain.
+The app ships with seven providers. The user's choice is stored in `Settings`; API keys live in the Keychain.
 
 ```mermaid
 flowchart TB
@@ -465,6 +530,7 @@ flowchart TB
         DeepSeekKey["deepseek"]
         OpenCodeGoKey["opencodeGo"]
         DashscopeKey["dashscope"]
+        GeminiKey["gemini"]
     end
 
     subgraph Providers["TranslationProvider"]
@@ -475,6 +541,7 @@ flowchart TB
         DeepSeek["deepseek"]
         OpenCodeGo["opencodeGo"]
         QwenOmni["qwenOmni"]
+        GeminiLive["geminiLive"]
     end
 
     subgraph Backends["Translator implementations"]
@@ -483,6 +550,7 @@ flowchart TB
         OT["OllamaTranslator"]
         MAT["MessagesAPITranslator"]
         QT["QwenOmniTranslator"]
+        GLT["GeminiLiveTranslator"]
     end
 
     Apple --> AT
@@ -497,11 +565,14 @@ flowchart TB
     OpenCodeGo --> MAT
     QwenOmni -->|read key| DashscopeKey
     QwenOmni --> QT
+    GeminiLive -->|read key| GeminiKey
+    GeminiLive --> GLT
 
     MAT -->|api.anthropic.com| AnthropicCloud["Anthropic Messages API"]
     MAT -->|api.deepseek.com/anthropic| DeepSeekCloud["DeepSeek Anthropic-compatible API"]
     MAT -->|opencode.ai/zen/go| OpenCodeGoCloud["OpenCode Go Messages API"]
     QT -->|dashscope-intl.aliyuncs.com| QwenCloud["Qwen Omni API"]
+    GLT -->|wss generativelanguage.googleapis.com| GeminiCloud["Gemini Live API"]
     OT -->|127.0.0.1:11434| OllamaServer["Ollama server"]
     AT -->|Apple Translation framework| OnDeviceNMT["On-device NMT model"]
     FMT -->|FoundationModels framework| AppleIntelligence["Apple Intelligence"]
@@ -511,7 +582,7 @@ flowchart TB
 
 ---
 
-## 7. Audio capture and recovery
+## 8. Audio capture and recovery
 
 `SystemAudioTap` builds a Core Audio process tap and aggregate device, converts the audio to the downstream format, and survives output-device changes (for example, Bluetooth headphones disconnecting).
 
@@ -525,7 +596,7 @@ flowchart TB
 
     Tap --> Aggregate --> IOProc
     IOProc -->|raw PCM| Converter["FormatConverter"]
-    Converter -->|AudioChunk| Downstream["AppleTranscriber / VoiceSegmenter"]
+    Converter -->|AudioChunk| Downstream["AppleTranscriber / VoiceSegmenter /<br/>GeminiLiveTranslator"]
 
     Watchdog["Watchdog timer<br/>stall detection"] -->|no buffer > 3s| Rebuild
     DeviceListener["Device-list listener"] -->|built-on device removed| Rebuild
@@ -545,7 +616,7 @@ The tap can target a single bundle ID or all system audio except the app itself 
 
 ---
 
-## 8. Configuration and secrets
+## 9. Configuration and secrets
 
 User settings are persisted in `UserDefaults`. API keys are stored in the Keychain and are never written to defaults. On first launch, `Settings.load` prefers a configured cloud backend over the on-device Apple translator.
 
@@ -563,6 +634,8 @@ flowchart LR
         Context["contextTurns"]
         Glossary["glossary"]
         OmniModel["omniModel"]
+        OpenCodeModel["opencodeModel"]
+        GeminiModel["geminiModel"]
     end
 
     subgraph Keychain["Keychain"]
@@ -570,6 +643,7 @@ flowchart LR
         DeepSeek["deepseek"]
         OpenCodeGo["opencodeGo"]
         Dashscope["dashscope"]
+        Gemini["gemini"]
     end
 
     UserDefaults --> Settings["Settings.load() / save()"]
@@ -583,7 +657,7 @@ flowchart LR
 
 ---
 
-## 9. CLI diagnostics
+## 10. CLI diagnostics
 
 The same executable can run diagnostic subcommands instead of launching the GUI. These exercise one layer at a time and are useful for verifying setup.
 
@@ -598,6 +672,8 @@ flowchart LR
     CLI --> Provider["--provider"]
     CLI --> OmniModel["--omni-model"]
     CLI --> OmniTest["--omni-test"]
+    CLI --> GeminiModel["--gemini-model"]
+    CLI --> GeminiTest["--gemini-test"]
     CLI --> Compare["--compare"]
     CLI --> Capture["--capture"]
     CLI --> Listen["--listen"]
@@ -621,4 +697,5 @@ flowchart LR
     StoreSelfTest --> SubtitleStore["SubtitleStore"]
     DeviceSwitchTest --> SystemAudioTap
     OmniTest --> QwenOmniTranslator["QwenOmniTranslator"]
+    GeminiTest --> GeminiLiveTranslator["GeminiLiveTranslator"]
 ```

@@ -43,6 +43,7 @@ struct Settings: Sendable {
         static let glossary = "glossary"
         static let omniModel = "omniModel"
         static let opencodeModel = "opencodeModel"
+        static let geminiModel = "geminiModel"
     }
 
     /// Which Qwen omni model ID to call. A defaults key rather than a stored
@@ -61,6 +62,13 @@ struct Settings: Sendable {
     static var opencodeModel: String {
         get { UserDefaults.standard.string(forKey: Key.opencodeModel) ?? "deepseek-v4.1-flash" }
         set { UserDefaults.standard.set(newValue, forKey: Key.opencodeModel) }
+    }
+
+    /// Which Gemini Live model ID to call, for the same reasons as `omniModel`:
+    /// the default is a preview ID, and previews get renamed.
+    static var geminiModel: String {
+        get { UserDefaults.standard.string(forKey: Key.geminiModel) ?? GeminiLiveTranslator.defaultModel }
+        set { UserDefaults.standard.set(newValue, forKey: Key.geminiModel) }
     }
 
     static func load() -> Settings {

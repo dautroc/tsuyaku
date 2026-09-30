@@ -8,6 +8,84 @@ patch version moves for fixes and packaging. Nothing here is API-stable.
 
 ## [Unreleased]
 
+Adds a second audio-native backend, and the first one that streams. Everything
+else is unchanged and still the default; the new path is opt-in.
+
+### Added
+
+**Gemini Live Translate backend.** `geminiLive` streams the tap's audio to
+`gemini-3.5-live-translate-preview` over the Live API's bidirectional
+WebSocket. The server returns both the source transcript and the English
+translation, so unlike the Qwen path, rows carry the Japanese and the "hearing"
+line works. It implements a new `LiveTranslator` protocol rather than
+`AudioTranslator`: the model translates as it hears, so there is no finished
+utterance to hand over, and the next sentence is being heard while the last is
+still being translated. There is no `VoiceSegmenter` on this path.
+
+"Detect English Automatically" becomes the model's `echoTargetLanguage`: with it
+on, English turns come through verbatim; with it off, they produce nothing.
+
+Connections last about ten minutes. On `goAway` or a dropped socket the client
+reconnects with the last session-resumption handle, keeps up to five seconds of
+audio buffered during the handover, and flashes "Reconnecting to Gemini…". It
+gives up after five failed connections in a row and says so in the panel.
+
+**`LiveRowSegmenter`.** Decides where subtitle rows begin and end. The
+translate model sends no turn boundaries at all -- no `turnComplete`, no
+`generationComplete` -- so rows are cut from the text: one row per English
+sentence, the same shape the recognizer paths produce, with 2.5 s of output
+silence closing a row that never reaches a sentence end. English rows take their
+text from the model's echo, which lines up with those cuts, rather than from the
+transcript, which runs about a second ahead of it. It is a value type with an
+injected clock, and `LiveSelfTest` in `make test` replays real server traffic
+through it fragment for fragment.
+
+**`--gemini-test [file.wav]`, `--gemini-model <id>`.** Streams a recording (or
+one second of silence) in real time, followed by three seconds of silence, and
+prints every raw server message, with audio payloads elided, next to the deltas
+parsed from it. A refused setup or a wrong model ID surfaces here as the
+server's close reason, and fails at once rather than being retried.
+
+### Verified against the live API
+
+With synthesised speech from `say`, not yet in a real meeting:
+
+- The transcription options belong at the top level of `setup`. The translate
+  guide's sample puts them inside `generationConfig`, and the server refuses
+  that. `translationConfig`, `sessionResumption` and `contextWindowCompression`
+  are all accepted where they are.
+- Japanese source and English translation arrive interleaved, a fragment of a
+  few words about once a second. The translation trails its source by about
+  0.2 s; the English echo trails its source by about 1 s.
+- Session-resumption handles arrive every few seconds.
+
+### Known limitations
+
+**The last words before audio stops are not translated.** The model does not
+flush on `audioStreamEnd`; it needs silence after the speech. That is why
+`--gemini-test` pads its input, and in a meeting the tap never stops.
+
+**Reconnection is untested.** A `goAway` is expected about every ten minutes,
+and no test has run that long. Run the app for more than fifteen minutes before
+relying on it for a long meeting.
+
+**Language detection can misfire.** On one run, a short synthesised English
+clip was transcribed as Thai. The English output was still right, but the row
+showed Thai as its source. A longer English clip was detected correctly.
+
+**It is billed for audio nobody hears.** The translate model responds only
+with AUDIO, so the text is read from its output transcription and the audio is
+thrown away, but still paid for. At the preview prices listed in September 2026
+($0.0053/min input, $0.0315/min output audio), a fully translated hour costs
+about $2.20.
+
+**No glossary and no context.** The translate model takes no instructions, so
+the glossary and prior-turn context that the text backends use do not reach it.
+
+**Source text is matched to rows by arrival time.** A row's Japanese can run a
+few words into the next sentence, for example "お疲れ様です。それでは本日の"
+over "Thank you for your hard work." The translation itself is unaffected.
+
 ## [0.2.0] - 2026-09-18
 
 Adds a translation backend that listens instead of reading. Everything from
