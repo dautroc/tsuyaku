@@ -36,7 +36,9 @@ final class PipelineController {
         store.status = "Starting…"
 
         do {
-            let glossary = settings.glossary
+            // Re-read at every Start rather than held in `Settings`, so an edit
+            // to the file needs nothing more than stopping and starting.
+            let glossary = Glossary.loadUser()
 
             // The audio backends consume audio directly, so they need no
             // transcription graph at all -- and must not build one, since
@@ -58,7 +60,8 @@ final class PipelineController {
             let prepared = try await TranscriberFactory.make(
                 primary: settings.sourceLocale,
                 secondary: settings.autoDetectLanguage ? settings.secondaryLocale : nil,
-                primaryTerms: glossary.sourceTerms
+                primaryTerms: glossary.sourceTerms,
+                secondaryTerms: glossary.targetTerms
             )
 
             let tap = SystemAudioTap(bundleIDs: settings.targetBundleIDs,
@@ -256,6 +259,9 @@ final class PipelineController {
         }
         if !glossary.isEmpty {
             log.info("glossary not applied: \(self.settings.provider.rawValue, privacy: .public) takes no instructions")
+            // The user wrote those terms expecting them to work; say they don't
+            // here, rather than leave them to conclude the file is broken.
+            store.flashNotice("Glossary not used: this backend takes no instructions")
         }
 
         let tap = SystemAudioTap(bundleIDs: settings.targetBundleIDs,

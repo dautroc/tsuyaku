@@ -21,6 +21,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// main thread every time the menu is rebuilt.
     private var providersWithKeys: Set<TranslationProvider> = []
     private var runningObserver: AnyCancellable?
+    private let transcripts = TranscriptWriter(directory: AppPaths.transcriptsDirectory)
+    /// Refilled every time it opens (`menuNeedsUpdate`): which apps are playing
+    /// audio is only true for the moment someone looks.
+    private var captureMenu: NSMenu?
 
     /// The menu bar item goes up before anything reads the keychain.
     ///
@@ -38,6 +42,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// session, so "Start Subtitles" shows it and "Stop Subtitles" puts it away.
     func applicationDidFinishLaunching(_ notification: Notification) {
         panel = FloatingPanel(store: store)
+        store.onSettled = { [weak self] rows in self?.saveSettled(rows) }
         setUpStatusItem()
         // `start()` flips `isRunning` after its awaits, and the pipeline can
         // stop itself on failure, so the menu title follows the store rather
@@ -77,6 +82,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         controller?.stop()
+        endTranscript()
     }
 
     // MARK: - Menu bar
@@ -128,6 +134,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
         menu.addItem(withTitle: "Copy Transcript", action: #selector(copyTranscript), keyEquivalent: "c").target = self
         menu.addItem(withTitle: "Clear", action: #selector(clear), keyEquivalent: "").target = self
+        let save = menu.addItem(withTitle: "Save Transcripts",
+                                action: #selector(toggleSaveTranscripts(_:)), keyEquivalent: "")
+        save.target = self
+        save.state = settings.saveTranscripts ? .on : .off
+        save.toolTip = "Write each session's subtitles to a Markdown file as they settle."
+        menu.addItem(withTitle: "Open Transcripts Folder", action: #selector(openTranscriptsFolder), keyEquivalent: "").target = self
         menu.addItem(.separator())
 
         let detect = menu.addItem(withTitle: "Detect English Automatically",
@@ -135,6 +147,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         detect.target = self
         detect.state = settings.autoDetectLanguage ? .on : .off
         detect.toolTip = "Run a second English recognizer and show English turns verbatim, untranslated."
+
+        let capture = NSMenuItem(title: "Capture From", action: nil, keyEquivalent: "")
+        let captureMenu = NSMenu()
+        captureMenu.delegate = self
+        capture.submenu = captureMenu
+        menu.addItem(capture)
+        self.captureMenu = captureMenu
+        // Filled now as well as on open: AppKit is not consistent about
+        // offering to open a submenu that has no items yet.
+        menuNeedsUpdate(captureMenu)
         menu.addItem(.separator())
 
         let translation = NSMenuItem(title: "Translation", action: nil, keyEquivalent: "")
@@ -160,6 +182,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         translation.submenu = submenu
         menu.addItem(translation)
 
+        let glossary = menu.addItem(withTitle: "Edit Glossary…", action: #selector(editGlossary), keyEquivalent: "")
+        glossary.target = self
+        glossary.toolTip = "Names and terms to always translate the same way. Changes apply at the next Start."
         menu.addItem(withTitle: "Install Japanese Translation…", action: #selector(installModel), keyEquivalent: "").target = self
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit Tsuyaku", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
@@ -180,8 +205,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let controller else { return }
         if store.isRunning {
             controller.stop()
+            endTranscript()
             panel?.orderOut(nil)
         } else {
+            transcripts.begin()
             // Shown before the awaits so "Starting…" is on screen at once.
             panel?.orderFrontRegardless()
             Task { await controller.start() }
@@ -202,9 +229,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         rebuildController()
     }
 
+    /// "All Apps" carries no bundle ID. Mid-meeting, this recaptures at once:
+    /// `rebuildController` cycles a running pipeline onto the new tap.
+    @objc private func selectCaptureSource(_ sender: NSMenuItem) {
+        let ids = (sender.representedObject as? String).map { [$0] } ?? []
+        guard ids != settings.targetBundleIDs else { return }
+        settings.targetBundleIDs = ids
+        settings.save()
+        rebuildController()
+    }
+
+    /// Takes effect from the next row; the pipeline itself never reads it.
+    @objc private func toggleSaveTranscripts(_ sender: NSMenuItem) {
+        settings.saveTranscripts.toggle()
+        settings.save()
+        sender.state = settings.saveTranscripts ? .on : .off
+    }
+
+    @objc private func openTranscriptsFolder() {
+        let dir = AppPaths.transcriptsDirectory
+        do {
+            try AppPaths.ensureDirectory(dir)
+        } catch {
+            log.error("could not create transcripts folder: \(error.localizedDescription, privacy: .public)")
+            return
+        }
+        NSWorkspace.shared.open(dir)
+    }
+
+    /// Creates the file with an explanatory starter on first use, then hands it
+    /// to the default text editor. There is nothing to reload: the pipeline
+    /// reads the file at every Start.
+    @objc private func editGlossary() {
+        let url = AppPaths.glossaryFile
+        if !FileManager.default.fileExists(atPath: url.path) {
+            do {
+                try AppPaths.ensureDirectory(AppPaths.directory)
+                try Glossary.starterText.write(to: url, atomically: true, encoding: .utf8)
+            } catch {
+                log.error("could not create glossary: \(error.localizedDescription, privacy: .public)")
+                return
+            }
+        }
+        NSWorkspace.shared.open(url)
+        if store.isRunning {
+            store.flashNotice("Glossary changes apply the next time subtitles start")
+        }
+    }
+
     /// `Settings` is a value copied into the controller at init, so any change
-    /// to it means cycling the pipeline. One implementation, because there are
-    /// now two settings that need it and a third is easy to get subtly wrong.
+    /// to it means cycling the pipeline. One implementation, because three
+    /// settings need it now and a fourth is easy to get subtly wrong.
     private func rebuildController() {
         let wasRunning = store.isRunning
         if wasRunning { controller?.stop() }
@@ -219,6 +294,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func copyTranscript() {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(store.transcriptMarkdown, forType: .string)
+    }
+
+    // MARK: - Saved transcript
+
+    private func saveSettled(_ rows: [SubtitleLine]) {
+        guard settings.saveTranscripts else { return }
+        transcripts.append(rows)
+    }
+
+    /// Ends the session's file with whatever the live pane still holds: a
+    /// translation cut off by Stop, or a provisional row the gate never got to
+    /// settle. Those rows never graduate, so without this the last thing said
+    /// in a meeting would be missing from its transcript. After
+    /// `controller.stop()`, which settles an open Gemini row first.
+    private func endTranscript() {
+        if settings.saveTranscripts {
+            transcripts.append(store.live.filter { !$0.source.isEmpty || !$0.target.isEmpty })
+        }
+        transcripts.finish()
     }
 
     /// Apple's Translation framework will not download a language pair from a
@@ -257,5 +351,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             store.status = "Idle"
         }
+    }
+}
+
+// MARK: - Capture From
+
+extension AppDelegate: NSMenuDelegate {
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        guard menu === captureMenu else { return }
+        menu.removeAllItems()
+        let selected = settings.targetBundleIDs.first
+
+        let all = menu.addItem(withTitle: "All Apps", action: #selector(selectCaptureSource(_:)), keyEquivalent: "")
+        all.target = self
+        all.state = selected == nil ? .on : .off
+        all.toolTip = "Everything this Mac plays, except Tsuyaku itself."
+        menu.addItem(.separator())
+
+        // The HAL lists a process once per audio client, and lists us too.
+        var seen: Set<String> = []
+        var ids = ((try? CA.runningOutputBundleIDs()) ?? []).filter {
+            $0 != Bundle.main.bundleIdentifier && seen.insert($0).inserted
+        }
+        // The chosen app stays listed while it is quiet or not running: the
+        // tap reattaches when it relaunches, and the user needs to see what
+        // capture is limited to.
+        if let selected, !seen.contains(selected) { ids.append(selected) }
+
+        if ids.isEmpty {
+            menu.addItem(withTitle: "No apps are playing audio", action: nil, keyEquivalent: "").isEnabled = false
+            return
+        }
+        let apps = ids.map { (id: $0, app: Self.application($0)) }
+            .sorted { $0.app.name.localizedStandardCompare($1.app.name) == .orderedAscending }
+        for (id, app) in apps {
+            let item = menu.addItem(withTitle: app.name, action: #selector(selectCaptureSource(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = id
+            item.state = id == selected ? .on : .off
+            item.image = app.icon
+            item.toolTip = id
+        }
+    }
+
+    /// Display name and icon for a bundle ID, or the ID itself when Launch
+    /// Services does not know it -- helper processes, mostly.
+    private static func application(_ bundleID: String) -> (name: String, icon: NSImage?) {
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else {
+            return (bundleID, nil)
+        }
+        let icon = NSWorkspace.shared.icon(forFile: url.path)
+        icon.size = NSSize(width: 16, height: 16)
+        return (FileManager.default.displayName(atPath: url.path), icon)
     }
 }

@@ -8,6 +8,44 @@ patch version moves for fixes and packaging. Nothing here is API-stable.
 
 ## [Unreleased]
 
+Three things that were half-built, now reachable from the menu bar: the
+glossary, a per-app capture source, and transcripts that outlast the panel.
+
+### Added
+
+**Glossary file.** The glossary has biased the recognizer and gone into every
+LLM prompt since 0.1.0, but nothing could set it. It is now
+`~/Library/Application Support/Tsuyaku/glossary.txt`, one `ラクスル = Raksul`
+per line, created with a starter and opened by **Edit Glossary…**. Plain text
+rather than JSON because TextEdit's smart quotes silently break JSON; full-width
+`＝` is accepted because that is what a Japanese IME types. The file is re-read
+at every Start, so there is nothing to reload. The English terms now also bias
+the English recognizer when auto-detect runs one. Gemini Live takes no
+instructions, and the panel now says so instead of ignoring the file quietly.
+`--glossary` prints what was parsed, and `--pipeline` uses the file instead of
+two hard-coded terms.
+
+**Capture From.** A submenu that limits capture to one app, so a YouTube tab or
+a Slack ping no longer gets subtitled mid-meeting. It lists the apps playing
+audio at the moment it opens, and keeps the chosen one listed while it is quiet.
+The tap already reattached a bundle across relaunches; this is the first way to
+choose one outside `--capture`.
+
+**Saved transcripts.** Each session, from Start to Stop, is written to
+`Transcripts/<date time>.md` next to the glossary as its rows settle. The file
+is readable by its owner only. Nothing is written for a session in which nobody
+spoke, and changing provider mid-meeting stays in the same file. At Stop,
+whatever is still in the live pane is written too, so the last thing said is
+not lost. On by default; **Save Transcripts** turns it off and **Open
+Transcripts Folder** shows the files.
+
+### Changed
+
+- The glossary is no longer a `UserDefaults` key. Nothing ever wrote that key,
+  so no saved glossary is lost.
+- Copy Transcript no longer puts an empty `>` quote above Qwen Omni rows, which
+  have no source text. The copied and saved transcripts share one format.
+
 ## [0.3.0] - 2026-09-30
 
 Adds two translation backends -- Gemini Live Translate, the first that streams

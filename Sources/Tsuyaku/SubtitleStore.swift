@@ -22,6 +22,29 @@ struct SubtitleLine: Identifiable, Equatable {
     var translationDone: Bool
     var failed: Bool
     let at: Date
+
+    /// The row as Markdown, shared by Copy Transcript and the saved file so the
+    /// two can never disagree about what a row looks like.
+    func markdown(time: DateFormatter) -> String {
+        var out = "**\(time.string(from: at))**\n\n"
+        if language == .en {
+            // Not a blockquote: an English row is the subtitle itself, not
+            // a source line being glossed by a translation below it.
+            out += "\(source)\n\n"
+        } else {
+            // The Qwen path has no source text; an empty quote is just noise.
+            if !source.isEmpty { out += "> \(source)\n\n" }
+            out += "\(target)\n\n"
+        }
+        return out
+    }
+
+    /// `HH:mm:ss`, the per-row stamp in every transcript.
+    static func timeFormatter() -> DateFormatter {
+        let fmt = DateFormatter()
+        fmt.dateFormat = "HH:mm:ss"
+        return fmt
+    }
 }
 
 /// The view model behind the floating panel.
@@ -69,6 +92,11 @@ final class SubtitleStore: ObservableObject {
 
     /// Cap retained history so a three-hour meeting can't grow without bound.
     private let maxLines = 500
+
+    /// Called with every batch of rows as it graduates into `history`: each
+    /// row exactly once, in order, whatever the cap later trims. The saved
+    /// transcript hangs off this, which is what lets it outlive the cap.
+    var onSettled: (([SubtitleLine]) -> Void)?
 
     var hasLiveContent: Bool { !live.isEmpty || !hearing.isEmpty }
 
@@ -147,6 +175,7 @@ final class SubtitleStore: ObservableObject {
         // graduate several sentences at once.
         settledCount += ready.count
         if history.count > maxLines { history.removeFirst(history.count - maxLines) }
+        onSettled?(ready)
     }
 
     func clear() {
@@ -186,20 +215,7 @@ final class SubtitleStore: ObservableObject {
     }
 
     var transcriptMarkdown: String {
-        var out = "# Meeting transcript\n\n"
-        let fmt = DateFormatter()
-        fmt.dateFormat = "HH:mm:ss"
-        for l in history + live {
-            out += "**\(fmt.string(from: l.at))**\n\n"
-            if l.language == .en {
-                // Not a blockquote: an English row is the subtitle itself, not
-                // a source line being glossed by a translation below it.
-                out += "\(l.source)\n\n"
-            } else {
-                out += "> \(l.source)\n\n"
-                out += "\(l.target)\n\n"
-            }
-        }
-        return out
+        let fmt = SubtitleLine.timeFormatter()
+        return (history + live).reduce("# Meeting transcript\n\n") { $0 + $1.markdown(time: fmt) }
     }
 }

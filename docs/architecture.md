@@ -68,6 +68,12 @@ flowchart TB
         Menu["Menu bar menu"]
     end
 
+    subgraph Files["~/Library/Application Support/Tsuyaku"]
+        GlossaryFile[("glossary.txt")]
+        Writer["TranscriptWriter"]
+        Transcripts[("Transcripts/*.md")]
+    end
+
     App -->|audio output| Tap
     Tap -->|raw buffers| Converter
     Converter -->|AudioChunk| Factory
@@ -104,6 +110,11 @@ flowchart TB
     View --> Panel
     Panel -->|display| User[(User)]
 
+    GlossaryFile -.->|terms, read at Start| Factory
+    GlossaryFile -.->|terms, read at Start| TextProvider
+    Store -->|settled rows| Writer
+    Writer --> Transcripts
+
     AppDelegate{{AppDelegate}} -->|owns| Menu
     AppDelegate -->|owns / shows| Panel
     AppDelegate -->|creates| Store
@@ -114,6 +125,8 @@ flowchart TB
 
 - Text providers (`apple`, `foundation`, `ollama`, `anthropic`, `deepseek`, `opencodeGo`) build an `AppleTranscriber`-based graph.
 - The audio-native providers bypass speech recognition. `qwenOmni` builds a `VoiceSegmenter`-based graph; `geminiLive` streams the audio into one live session with no segmenter at all.
+
+Every path ends in `SubtitleStore`, and every row leaves the live pane through one method, `graduate()`. That is where `onSettled` hands the row to `TranscriptWriter`, so the saved transcript covers all backends and is unaffected by the panel's 500-row cap.
 
 ---
 
@@ -263,14 +276,38 @@ classDiagram
         +Set~TranslationProvider~ providersWithKeys
         +NSStatusItem statusItem
         +AnyCancellable runningObserver
+        +TranscriptWriter transcripts
+        +NSMenu? captureMenu
         +applicationDidFinishLaunching()
         +toggle()
         +buildMenu()
+        +menuNeedsUpdate(menu)
         +loadSettings()
         +rebuildController()
+        +selectCaptureSource(item)
+        +editGlossary()
+        +toggleSaveTranscripts(item)
+        +openTranscriptsFolder()
         +installModel()
         +copyTranscript()
         +clear()
+    }
+
+    class TranscriptWriter {
+        +URL directory
+        +URL? currentFile
+        +begin()
+        +append(lines)
+        +finish()
+    }
+
+    class Glossary {
+        +Dictionary entries
+        +[String] sourceTerms
+        +[String] targetTerms
+        +String promptLines
+        +parse(text) Glossary
+        +loadUser() Glossary
     }
 
     class PipelineController {
@@ -304,6 +341,7 @@ classDiagram
         +SpokenLanguage? activeLanguage
         +Bool autoDetecting
         +Int settledCount
+        +Closure onSettled
         +beginLine(utterance:source:provisional:language)
         +append(utterance:delta)
         +appendSource(utterance:delta)
@@ -445,7 +483,7 @@ classDiagram
         +Int maxLatencySeconds
         +Int contextTurns
         +TranslationProvider provider
-        +Glossary glossary
+        +Bool saveTranscripts
         +static String omniModel
         +static String opencodeModel
         +static String geminiModel
@@ -488,6 +526,9 @@ classDiagram
     AppDelegate --> FloatingPanel
     AppDelegate --> Settings
     AppDelegate --> TranslationDownloadHost
+    AppDelegate --> TranscriptWriter
+    SubtitleStore ..> TranscriptWriter : onSettled
+    PipelineController ..> Glossary : loadUser at Start
 
     PipelineController --> SystemAudioTap
     PipelineController --> AppleTranscriber
@@ -612,13 +653,18 @@ flowchart TB
     Failure --> AppDelegate
 ```
 
-The tap can target a single bundle ID or all system audio except the app itself (`bundleIDs == []`). The `buffers` stream survives rebuilds; only `stop()` finishes it.
+The tap can target a single bundle ID or all system audio except the app itself (`bundleIDs == []`). The user chooses from the **Capture From** menu. It is refilled from `CA.runningOutputBundleIDs()` each time it opens and always lists the saved choice, even when that app is quiet or not running. `isProcessRestoreEnabled` reattaches the tap when that app relaunches. Changing the choice mid-meeting cycles the pipeline through `rebuildController()`. The `buffers` stream survives rebuilds; only `stop()` finishes it.
 
 ---
 
 ## 9. Configuration and secrets
 
 User settings are persisted in `UserDefaults`. API keys are stored in the Keychain and are never written to defaults. On first launch, `Settings.load` prefers a configured cloud backend over the on-device Apple translator.
+
+Two things the user owns live as files under `~/Library/Application Support/Tsuyaku` (`AppPaths`). That folder is used rather than `~/Documents`, which would trigger a macOS folder-access prompt.
+
+- **`glossary.txt`**: one `Japanese = English` per line, `#` for comments; full-width `＝` is accepted. **Edit Glossary…** creates it with a starter and opens it in the default text editor. It is not a setting: `PipelineController.start()` re-reads it through `Glossary.loadUser()` at every Start. Source terms bias the Japanese recognizer, target terms bias the English one, and the entries go into every LLM prompt. Gemini Live takes no instructions, so there the panel says the glossary is unused.
+- **`Transcripts/*.md`**: one file per session, from the user's Start to their Stop, opened on the first settled row and created `0600`. Pipeline restarts for settings changes stay in the same file. At Stop, rows still in the live pane are written once, and rows arriving outside a session or already written are dropped. That covers a translation cancelled by Stop that settles a moment later. **Save Transcripts** (on by default) turns this off.
 
 ```mermaid
 flowchart LR
@@ -632,7 +678,7 @@ flowchart LR
         Provider["translationProvider"]
         Latency["maxLatencySeconds"]
         Context["contextTurns"]
-        Glossary["glossary"]
+        SaveTranscripts["saveTranscripts"]
         OmniModel["omniModel"]
         OpenCodeModel["opencodeModel"]
         GeminiModel["geminiModel"]
@@ -646,6 +692,11 @@ flowchart LR
         Gemini["gemini"]
     end
 
+    subgraph Support["Application Support/Tsuyaku"]
+        GlossaryFile["glossary.txt"]
+        TranscriptFiles["Transcripts/*.md"]
+    end
+
     UserDefaults --> Settings["Settings.load() / save()"]
     Keychain --> Settings
     Keychain --> TranslationProvider["TranslationProvider.hasKey"]
@@ -653,6 +704,8 @@ flowchart LR
     Settings --> AppDelegate["AppDelegate"]
     Settings --> PipelineController["PipelineController"]
     TranslationProvider --> PipelineController
+    GlossaryFile -->|"Glossary.loadUser() at Start"| PipelineController
+    AppDelegate -->|TranscriptWriter| TranscriptFiles
 ```
 
 ---
@@ -669,6 +722,7 @@ flowchart LR
     CLI --> Preflight["--apple-preflight"]
     CLI --> SetKey["--set-key"]
     CLI --> Locale["--locale"]
+    CLI --> GlossaryFlag["--glossary"]
     CLI --> Provider["--provider"]
     CLI --> OmniModel["--omni-model"]
     CLI --> OmniTest["--omni-test"]
@@ -697,5 +751,7 @@ flowchart LR
     StoreSelfTest --> SubtitleStore["SubtitleStore"]
     DeviceSwitchTest --> SystemAudioTap
     OmniTest --> QwenOmniTranslator["QwenOmniTranslator"]
+    GlossaryFlag --> GlossaryParse["Glossary.loadUser"]
+    Pipeline --> GlossaryParse
     GeminiTest --> GeminiLiveTranslator["GeminiLiveTranslator"]
 ```

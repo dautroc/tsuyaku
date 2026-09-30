@@ -26,13 +26,14 @@ enum CLI {
       --gemini-model <id>         Gemini Live model ID (default: gemini-3.5-live-translate-preview)
       --gemini-test [file.wav]    stream one WAV to Gemini Live and print every server event
       --locale <bcp47>            speech locale for --listen / --install-assets (default: ja-JP)
+      --glossary                  print the glossary file's path and the entries parsed from it
       --compare                   run every configured backend over a Japanese fixture set
       --capture [bundle|global] [s]   dump captured audio to /tmp/tsuyaku-capture.wav
       --listen  [bundle|global] [s]   live transcription only, to stdout
       --listen-dual [bundle|global] [s]   ja + en side by side, with picker scores
       --listen-dual-file <path.wav>   the same, replayed from a --capture recording
       --translate-text <ja>       one-shot translation, reports TTFB
-      --pipeline [bundle|global] [s]  full pipeline to stdout
+      --pipeline [bundle|global] [s]  full pipeline to stdout, with the glossary applied
       --store-selftest            check the subtitle pane logic (no audio, no network)
       --device-switch-test        switch the output device mid-capture and verify recovery
 
@@ -318,6 +319,20 @@ enum CLI {
             exit(0)
         }
 
+        // What the pipeline will actually use, parsed exactly as Start parses
+        // it -- so a line the parser skipped shows up here as a missing entry.
+        if CommandLine.arguments.contains("--glossary") {
+            let url = AppPaths.glossaryFile
+            print("glossary file: \(url.path)")
+            guard FileManager.default.fileExists(atPath: url.path) else {
+                print("  (none yet -- create it from the menu bar: Edit Glossary…)")
+                exit(0)
+            }
+            let glossary = Glossary.loadUser()
+            print(glossary.isEmpty ? "  (no entries)" : glossary.promptLines)
+            exit(0)
+        }
+
         if CommandLine.arguments.contains("--apple-preflight") {
             print("=== Apple Translation preflight (ja -> en) ===")
             print(await AppleTranslator.preflight())
@@ -558,7 +573,8 @@ enum CLI {
         if let i = CommandLine.arguments.firstIndex(of: "--pipeline") {
             let bundle  = CommandLine.arguments.count > i+1 ? CommandLine.arguments[i+1] : "global"
             let seconds = CommandLine.arguments.count > i+2 ? Double(CommandLine.arguments[i+2]) ?? 30 : 30
-            let glossary = Glossary(entries: ["ラクスル": "Raksul", "見積もり": "quote"])
+            let glossary = Glossary.loadUser()
+            print("glossary: \(glossary.entries.count) term(s) from \(AppPaths.glossaryFile.path)")
             let provider = selectedProvider() ?? Settings.load().provider
             let translator = provider.makeTranslator(glossary: glossary)
             print("translator: \(provider.displayName)\(provider.isUsable ? "" : " -- \(provider.unusableReason ?? "unusable"), fell back to on-device")")

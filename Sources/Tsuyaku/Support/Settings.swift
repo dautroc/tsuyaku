@@ -1,7 +1,8 @@
 import Foundation
 
 /// User-facing configuration. Persisted in UserDefaults; the API key lives in
-/// the keychain instead.
+/// the keychain instead, and the glossary in a text file the user edits
+/// (`AppPaths.glossaryFile`, read at every Start by `Glossary.loadUser`).
 struct Settings: Sendable {
     var sourceLocale: Locale = Locale(identifier: "ja-JP")
     /// The second recognizer, run concurrently so English turns can be shown
@@ -27,7 +28,10 @@ struct Settings: Sendable {
     /// Number of prior (source, target) pairs sent as translation context.
     var contextTurns: Int = 4
     var provider: TranslationProvider = .apple
-    var glossary: Glossary = .empty
+    /// Append every settled row to a Markdown file per session. On by default:
+    /// the panel's history is capped, and a meeting is not something to get
+    /// back once it is over.
+    var saveTranscripts: Bool = true
 
     private enum Key {
         static let sourceLocale = "sourceLocale"
@@ -40,7 +44,7 @@ struct Settings: Sendable {
         static let maxLatency = "maxLatencySeconds"
         static let contextTurns = "contextTurns"
         static let provider = "translationProvider"
-        static let glossary = "glossary"
+        static let saveTranscripts = "saveTranscripts"
         static let omniModel = "omniModel"
         static let opencodeModel = "opencodeModel"
         static let geminiModel = "geminiModel"
@@ -101,8 +105,9 @@ struct Settings: Sendable {
         // A provider that cannot run must not silently degrade: a removed key,
         // or Apple Intelligence switched off under the on-device LLM.
         if !s.provider.isUsable { s.provider = .apple }
-        if let data = d.data(forKey: Key.glossary),
-           let g = try? JSONDecoder().decode(Glossary.self, from: data) { s.glossary = g }
+        if d.object(forKey: Key.saveTranscripts) != nil {
+            s.saveTranscripts = d.bool(forKey: Key.saveTranscripts)
+        }
         return s
     }
 
@@ -118,6 +123,6 @@ struct Settings: Sendable {
         d.set(maxLatencySeconds, forKey: Key.maxLatency)
         d.set(contextTurns, forKey: Key.contextTurns)
         d.set(provider.rawValue, forKey: Key.provider)
-        if let data = try? JSONEncoder().encode(glossary) { d.set(data, forKey: Key.glossary) }
+        d.set(saveTranscripts, forKey: Key.saveTranscripts)
     }
 }

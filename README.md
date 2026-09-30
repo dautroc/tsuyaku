@@ -46,6 +46,9 @@ make test
 | Floating subtitle panel | Resizable subtitle window shown/hidden from the menu bar. |
 | Automatic English detection | Optional concurrent `en-US` recognizer shows English turns verbatim; off by default. |
 | Gemini Live Translate | Optional `geminiLive` backend: streams meeting audio to `gemini-3.5-live-translate-preview`, which transcribes and translates it in the cloud with no on-device recognizer. |
+| Glossary | **Edit Glossary…** opens `glossary.txt`, one `ラクスル = Raksul` per line. Terms help recognition hear names and keep translations consistent. Changes apply at the next Start. |
+| Capture From | Subtitle one app (Zoom, Teams, a browser) instead of everything the Mac plays. The menu lists the apps currently playing audio. |
+| Saved transcripts | Each session is saved as Markdown in `~/Library/Application Support/Tsuyaku/Transcripts` as its lines settle, beyond the panel's 500-line history. **Save Transcripts** turns this off; **Open Transcripts Folder** shows them. |
 | Settings persistence | Provider choice and API keys in the keychain survive relaunches. |
 
 Choose a backend from the menu bar or with `--provider`. Store API keys in the keychain with:

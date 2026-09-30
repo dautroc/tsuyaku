@@ -24,11 +24,15 @@ enum StoreSelfTest {
         settledCountSurvivesCap()
         settledCountCountsRowsNotCalls()
         clearResetsSettledCount()
+        onSettledReportsEachRowOnce()
+        transcriptOmitsAnEmptySource()
         scrollRuleFollowsTheSpeaker()
         scrollRuleSurvivesTheLivePane()
         scrollRuleLetsTheUserReadBack()
         failures += PickerSelfTest.run()
         failures += LiveSelfTest.run()
+        failures += GlossarySelfTest.run()
+        failures += TranscriptSelfTest.run()
         print(failures == 0 ? "\nall checks passed" : "\n\(failures) CHECK(S) FAILED")
         exit(failures == 0 ? 0 : 1)
     }
@@ -214,6 +218,47 @@ enum StoreSelfTest {
         s.clear()
         expect("clear resets the counter", s.settledCount == 0)
         expect("clear empties history", s.history.isEmpty)
+    }
+
+    /// The saved transcript hangs off `onSettled`, and has to outlive the cap:
+    /// every row reported exactly once, in order, and not before it settles.
+    private static func onSettledReportsEachRowOnce() {
+        let s = SubtitleStore()
+        var reported: [SubtitleLine] = []
+        s.onSettled = { reported += $0 }
+
+        let turn = UUID()
+        s.beginLine(utterance: turn, source: "納期については", provisional: true)
+        s.append(utterance: turn, delta: "As for the deadline")
+        s.finishLine(utterance: turn)
+        expect("a provisional row is not reported", reported.isEmpty)
+        s.beginLine(utterance: turn, source: "納期については来月まで。", provisional: false)
+        s.append(utterance: turn, delta: "The deadline is next month.")
+        s.finishLine(utterance: turn)
+        expect("only its revision is reported",
+               reported.map(\.target) == ["The deadline is next month."])
+
+        for i in 0..<520 {
+            let u = UUID()
+            s.beginLine(utterance: u, source: "line \(i)", provisional: false)
+            s.finishLine(utterance: u)
+        }
+        expect("every row is reported past the cap", reported.count == 521)
+        expect("each exactly once", Set(reported.map(\.id)).count == reported.count)
+        expect("in spoken order", reported.last?.source == "line 519")
+    }
+
+    /// Qwen rows have no source text, and an empty `> ` quote above every
+    /// translation is noise in the copied and saved transcripts alike.
+    private static func transcriptOmitsAnEmptySource() {
+        let s = SubtitleStore()
+        let u = UUID()
+        s.beginLine(utterance: u, source: "", provisional: false)
+        s.append(utterance: u, delta: "Let's begin.")
+        s.finishLine(utterance: u)
+        let md = s.transcriptMarkdown
+        expect("a row with no source has no quote", !md.contains(">"))
+        expect("but keeps its translation", md.contains("Let's begin."))
     }
 
     // MARK: - History pane follow rule
