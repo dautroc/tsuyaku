@@ -8,6 +8,12 @@ patch version moves for fixes and packaging. Nothing here is API-stable.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-30
+
+Captions of the user's own English, in Japanese, for colleagues reading a
+shared screen. Also a fix for subtitles going silent when a Bluetooth headset's
+microphone is opened, which a Meet call using that microphone did too.
+
 ### Added
 
 **Translate My Voice.** Japanese captions of the user's own English, for
@@ -376,7 +382,8 @@ The English-detection thresholds are unfitted (above). Sandboxing is off
 deliberately: without a provisioning profile it fights the process-tap and
 aggregate-device path for no benefit in a local build.
 
-[Unreleased]: https://github.com/dautroc/tsuyaku/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/dautroc/tsuyaku/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/dautroc/tsuyaku/releases/tag/v0.5.0
 [0.4.0]: https://github.com/dautroc/tsuyaku/releases/tag/v0.4.0
 [0.3.0]: https://github.com/dautroc/tsuyaku/releases/tag/v0.3.0
 [0.2.0]: https://github.com/dautroc/tsuyaku/releases/tag/v0.2.0
